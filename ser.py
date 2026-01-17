@@ -6,7 +6,7 @@ from transformers import Wav2Vec2ForSequenceClassification, Wav2Vec2FeatureExtra
 # -------------------------------
 # Configuration
 # -------------------------------
-AUDIO_PATH = "/content/T0001G0003S00001.wav"
+AUDIO_PATH = "D:/All/Emotion psychologist/T0001G0003S00001.wav"
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 SER_MODEL_ID = "superb/wav2vec2-large-superb-er"
 

@@ -1,24 +1,25 @@
 import os
 os.environ["TORCHCODEC_DISABLE"] = "1"
 
+import torch
 import librosa
-from transformers import pipeline
+import numpy as np
+from transformers import AutoFeatureExtractor, AutoModelForAudioClassification
 
-event_classifier = pipeline(
-    "audio-classification",
-    model="MIT/ast-finetuned-audioset-10-10-0.4593",
-    device=-1  # CPU
-)
+MODEL_NAME = "MIT/ast-finetuned-audioset-10-10-0.4593"
 
-def get_audio_events(audio_path):
-    audio, sr = librosa.load(audio_path, sr=16000, mono=True)
+extractor = AutoFeatureExtractor.from_pretrained(MODEL_NAME)
+model = AutoModelForAudioClassification.from_pretrained(MODEL_NAME)
 
-    results = event_classifier(
-        {"array": audio, "sampling_rate": sr},
-        top_k=10
-    )
+model.eval()  # inference mode
+device = torch.device("cpu")
+model.to(device)
 
-    target_labels = [
+# Label mapping
+id2label = model.config.id2label
+
+
+TARGET_LABELS = [
     # Speech
     #"speech",
     #"conversation",
@@ -78,12 +79,40 @@ def get_audio_events(audio_path):
     #"typing"
 ]
 
+
+def get_audio_events(audio_path, top_k=10):
+    # Load audio
+    audio, sr = librosa.load(audio_path, sr=16000, mono=True)
+
+    # Feature extraction
+    inputs = extractor(
+        audio,
+        sampling_rate=sr,
+        return_tensors="pt"
+    )
+
+    inputs = {k: v.to(device) for k, v in inputs.items()}
+
+    # Forward pass
+    with torch.no_grad():
+        outputs = model(**inputs)
+        logits = outputs.logits
+
+    # Convert to probabilities
+    probs = torch.softmax(logits, dim=-1)[0]
+
+    # Top-K predictions
+    top_probs, top_indices = torch.topk(probs, top_k)
+
     relevant_events = {}
-    for r in results:
-        if any(t in r["label"].lower() for t in target_labels):
-            relevant_events[r["label"]] = round(r["score"], 3)
+
+    for prob, idx in zip(top_probs, top_indices):
+        label = id2label[idx.item()]
+        score = prob.item()
+
+        if any(t in label.lower() for t in TARGET_LABELS):
+            relevant_events[label] = round(score, 3)
 
     return relevant_events
 
-
-print(get_audio_events("D:\All\Emotion psychologist\kids-laugh-45357.mp3"))
+print(get_audio_events(r"D:\All\Emotion psychologist\kids-laugh-45357.mp3"))
