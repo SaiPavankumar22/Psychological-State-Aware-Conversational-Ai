@@ -7,6 +7,37 @@ from dataclasses import dataclass, asdict, field
 import numpy as np
 
 # ========================================
+# SIMPLE INTENT DETECTION
+# ========================================
+
+def detect_simple_intent(text: str) -> str:
+    """
+    Simple rule-based intent detection.
+    Returns one of: question, statement, greeting, affirmation, negation, unknown
+    """
+    text_lower = text.lower().strip()
+    
+    # Greeting
+    if any(greet in text_lower for greet in ['hello', 'hi', 'hey', 'good morning', 'good evening']):
+        return "greeting"
+    
+    # Question
+    if text_lower.endswith('?') or any(text_lower.startswith(q) for q in ['what', 'when', 'where', 'why', 'how', 'who', 'is', 'are', 'can', 'could', 'would', 'should', 'do', 'does']):
+        return "question"
+    
+    # Affirmation
+    if any(aff in text_lower for aff in ['yes', 'yeah', 'yep', 'sure', 'okay', 'ok', 'agree', 'right', 'correct']):
+        return "affirmation"
+    
+    # Negation
+    if any(neg in text_lower for neg in ['no', 'nope', 'not really', 'disagree', 'wrong', "don't", "didn't", "won't"]):
+        return "negation"
+    
+    # Default to statement
+    return "statement"
+
+
+# ========================================
 # STRUCTURED DIALOGUE STATE
 # ========================================
 
@@ -46,7 +77,7 @@ class AbstractDialogueState:
     
     # Intent tracking (last N intents)
     recent_intents: List[str] = field(default_factory=list)
-    max_intent_history: int = 7
+    max_intent_history: int = 3
     
     # Coherence score (derived from turn similarity)
     coherence_score: float = 1.0
@@ -105,7 +136,7 @@ class ConversationState:
     def __init__(
         self,
         session_id: str,
-        max_recent_turns: int = 3,
+        max_recent_turns: int = 5,
         summary_update_interval: int = 5
     ):
         self.session_id = session_id
@@ -126,7 +157,7 @@ class ConversationState:
         user_text: str,
         system_response: str,
         psychological_state: Dict[str, float],
-        user_intent: str = "unknown",
+        user_intent: str = None,
         topic: str = "general"
     ):
         """
@@ -136,6 +167,10 @@ class ConversationState:
         - Buffer size never exceeds max_recent_turns
         - Oldest turn always removed first (FIFO)
         """
+        # Auto-detect intent if not provided
+        if user_intent is None:
+            user_intent = detect_simple_intent(user_text)
+        
         turn = DialogueTurn(
             timestamp=time.time(),
             user_utterance=user_text,
@@ -153,10 +188,46 @@ class ConversationState:
         # Update structured dialogue state
         self.dialogue_state.add_intent(user_intent)
         self.dialogue_state.turn_count += 1
+        
+        # Update coherence score based on conversation flow
+        self._update_coherence_score()
     
     def should_update_summary(self) -> bool:
         """Check if dialogue state needs updating"""
         return self.dialogue_state.turn_count % self.summary_update_interval == 0
+    
+    def _update_coherence_score(self):
+        """
+        Update coherence score based on conversation consistency.
+        
+        Coherence is high when:
+        - Topics are consistent
+        - Intents form logical patterns
+        - No abrupt shifts
+        """
+        if len(self.recent_turns) < 2:
+            self.dialogue_state.coherence_score = 1.0
+            return
+        
+        # Topic consistency (last 3 turns)
+        recent = self.recent_turns[-3:]
+        topics = [turn.topic for turn in recent]
+        topic_consistency = len(set(topics)) / len(topics)  # Lower is better
+        topic_score = 1.0 - (topic_consistency - 1.0 / len(topics))
+        
+        # Intent diversity (good to have variety)
+        recent_intents = self.dialogue_state.recent_intents[-5:]
+        if len(recent_intents) > 1:
+            intent_diversity = len(set(recent_intents)) / len(recent_intents)
+            intent_score = 0.5 + (intent_diversity * 0.5)  # Moderate diversity is good
+        else:
+            intent_score = 1.0
+        
+        # Combined coherence score (weighted average)
+        self.dialogue_state.coherence_score = round(
+            0.6 * topic_score + 0.4 * intent_score, 
+            2
+        )
     
     def get_context_for_llm(self) -> Dict:
         """
@@ -167,10 +238,10 @@ class ConversationState:
         - No unbounded growth
         - Structured representation
         """
-        # Compact recent turns (fixed size)
+        # Compact recent turns (ALL turns in buffer, up to max_recent_turns)
         recent_context = [
             turn.get_compact_representation()
-            for turn in self.recent_turns[-2:]  # Last 2 turns only
+            for turn in self.recent_turns  # All turns in buffer (max 5)
         ]
         
         return {

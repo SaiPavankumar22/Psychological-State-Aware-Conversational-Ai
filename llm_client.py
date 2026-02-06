@@ -79,14 +79,14 @@ Respond naturally to continue the conversation."""
 
 
 def _format_recent_context(recent: list) -> str:
-    """Format recent turns concisely"""
+    """Format recent turns concisely (all turns in buffer)"""
     if not recent:
         return "No recent context"
     
     formatted = []
-    for turn in recent[-2:]:  # Only last 2
-        formatted.append(f"User: {turn.get('user_summary', 'N/A')}")
-        formatted.append(f"You: {turn.get('system_summary', 'N/A')}")
+    for idx, turn in enumerate(recent, 1):  # All turns in buffer (max 5)
+        formatted.append(f"Turn {idx} - User: {turn.get('user_summary', 'N/A')}")
+        formatted.append(f"Turn {idx} - You: {turn.get('system_summary', 'N/A')}")
     
     return "\n".join(formatted)
 

@@ -142,7 +142,8 @@ class ConversationalAI:
     async def process_conversation_turn(
         self, 
         audio_data: str,
-        session_id: str
+        session_id: str,
+        voice_name: str = "en-US-DragonV2.1Neural"
     ) -> dict:
         """Process a conversation turn with full state management"""
         import asyncio
@@ -254,7 +255,8 @@ class ConversationalAI:
                 synthesize_azure_tts,
                 llm_reply,
                 tts_params,
-                "/tmp"
+                "/tmp",
+                voice_name
             )
             
             with open(tts_audio_path, "rb") as f:
@@ -267,7 +269,7 @@ class ConversationalAI:
                 transcript, 
                 llm_reply, 
                 instant_psychological_state,
-                user_intent="unknown",
+                user_intent=None,  # Auto-detect from transcript
                 topic=conv_state.dialogue_state.primary_topic
             )
             
@@ -287,6 +289,80 @@ class ConversationalAI:
                     if k not in ['trends', 'stability']
                 },
                 "tts_params": tts_params,
+                # Model outputs for debugging/monitoring
+                "model_outputs": {
+                    "asr": {
+                        "transcript": transcript,
+                        "latency_ms": asr_result['latency'] * 1000,
+                    },
+                    "text_emotion": {
+                        "top_emotions": dict(sorted(
+                            asr_result['text_emotion'].items(), 
+                            key=lambda x: x[1], 
+                            reverse=True
+                        )[:5]),  # Top 5 emotions
+                        "all_emotions": asr_result['text_emotion'],
+                    },
+                    "audio_analysis": {
+                        "ser": {
+                            "angry": ser_dict.get("angry", 0),
+                            "happy": ser_dict.get("happy", 0),
+                            "neutral": ser_dict.get("neutral", 0),
+                            "sad": ser_dict.get("sad", 0),
+                        },
+                        "ast": dict(sorted(
+                            audio_result["ast"].items(),
+                            key=lambda x: x[1],
+                            reverse=True
+                        )[:5]) if audio_result["ast"] else {},  # Top 5 events
+                        "latency_ms": audio_result['latency'] * 1000,
+                    },
+                    "fusion": {
+                        "instant_state": instant_psychological_state,
+                        "features_used": {
+                            "speech_rate": 3.6,
+                            "pause_duration": 0.5,
+                            "jitter": 0.1,
+                        }
+                    },
+                },
+                # Memory view data
+                "memory_view": {
+                    "session_id": session_id,
+                    "dialogue_state": conv_state.dialogue_state.to_dict(),
+                    "recent_turns": [
+                        {
+                            "user": turn.user_utterance[:50] + "..." if len(turn.user_utterance) > 50 else turn.user_utterance,
+                            "ai": turn.system_response[:50] + "..." if len(turn.system_response) > 50 else turn.system_response,
+                            "topic": turn.topic,
+                        }
+                        for turn in conv_state.recent_turns
+                    ],
+                    "emotional_trends": {
+                        "mode": adaptive_state['mode'],
+                        "confidence": adaptive_state.get('confidence', 0),
+                        "valence": {
+                            "current": adaptive_state['valence'],
+                            "trend": adaptive_state.get('trends', {}).get('valence_trend', 0),
+                        },
+                        "arousal": {
+                            "current": adaptive_state['arousal'],
+                            "trend": adaptive_state.get('trends', {}).get('arousal_trend', 0),
+                        },
+                        "stress": {
+                            "current": adaptive_state['stress'],
+                            "trend": adaptive_state.get('trends', {}).get('stress_trend', 0),
+                        },
+                        "clarity": {
+                            "current": adaptive_state['clarity'],
+                            "trend": adaptive_state.get('trends', {}).get('clarity_trend', 0),
+                        },
+                    },
+                    "topic_info": {
+                        "current_topic": conv_state.dialogue_state.primary_topic,
+                        "confidence": conv_state.dialogue_state.topic_confidence,
+                    }
+                }
             }
             
         except Exception as e:
@@ -314,7 +390,7 @@ class ConversationalAI:
         
         @web_app.get("/")
         async def root():
-            """Serve enhanced interface with start/stop controls"""
+            """Serve enhanced interface with voice selector and memory view"""
             html_content = """
 <!DOCTYPE html>
 <html lang="en">
@@ -333,18 +409,53 @@ class ConversationalAI:
             font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
             background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
             min-height: 100vh;
-            display: flex;
-            justify-content: center;
-            align-items: center;
             color: white;
+            padding: 20px;
+            overflow-x: hidden;
+        }
+        
+        .main-container {
+            text-align: center;
+            max-width: 900px;
+            margin: 0 auto;
             padding: 20px;
         }
         
-        .container {
-            text-align: center;
-            max-width: 800px;
-            width: 100%;
-            padding: 40px;
+        .debug-panels {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 15px;
+            margin-top: 30px;
+            max-width: 1400px;
+            margin-left: auto;
+            margin-right: auto;
+        }
+        
+        .debug-panel {
+            background: rgba(0, 0, 0, 0.3);
+            backdrop-filter: blur(10px);
+            border-radius: 15px;
+            padding: 20px;
+            max-height: 600px;
+            overflow-y: auto;
+        }
+        
+        .debug-panel::-webkit-scrollbar {
+            width: 8px;
+        }
+        
+        .debug-panel::-webkit-scrollbar-track {
+            background: rgba(255, 255, 255, 0.1);
+            border-radius: 10px;
+        }
+        
+        .debug-panel::-webkit-scrollbar-thumb {
+            background: rgba(255, 255, 255, 0.3);
+            border-radius: 10px;
+        }
+        
+        .debug-panel::-webkit-scrollbar-thumb:hover {
+            background: rgba(255, 255, 255, 0.5);
         }
         
         h1 {
@@ -534,12 +645,144 @@ class ConversationalAI:
         .hidden {
             display: none;
         }
+        
+        /* Voice Selector */
+        .voice-selector {
+            margin: 20px 0;
+        }
+        
+        .voice-selector label {
+            display: block;
+            margin-bottom: 8px;
+            font-size: 14px;
+            opacity: 0.9;
+        }
+        
+        .voice-selector select {
+            padding: 10px 15px;
+            font-size: 14px;
+            border-radius: 10px;
+            border: 2px solid rgba(255, 255, 255, 0.3);
+            background: rgba(255, 255, 255, 0.1);
+            color: white;
+            cursor: pointer;
+            width: 100%;
+            max-width: 350px;
+        }
+        
+        .voice-selector select option {
+            background: #1e293b;
+            color: white;
+        }
+        
+        /* Debug Panel Headers */
+        .panel-title {
+            font-size: 20px;
+            font-weight: 700;
+            margin-bottom: 15px;
+            text-align: center;
+            border-bottom: 2px solid rgba(255, 255, 255, 0.3);
+            padding-bottom: 10px;
+            color: #fbbf24;
+        }
+        
+        .section-header {
+            font-size: 14px;
+            font-weight: 600;
+            margin: 15px 0 10px 0;
+            color: #60a5fa;
+            border-left: 3px solid #60a5fa;
+            padding-left: 10px;
+        }
+        
+        .data-row {
+            font-size: 12px;
+            line-height: 1.8;
+            padding: 6px 10px;
+            background: rgba(255, 255, 255, 0.05);
+            margin-bottom: 4px;
+            border-radius: 5px;
+            display: flex;
+            justify-content: space-between;
+        }
+        
+        .data-row:hover {
+            background: rgba(255, 255, 255, 0.1);
+        }
+        
+        .data-label {
+            color: rgba(255, 255, 255, 0.7);
+            font-weight: 500;
+        }
+        
+        .data-value {
+            color: #fff;
+            font-weight: 600;
+            font-family: 'Courier New', monospace;
+        }
+        
+        .emotion-bar {
+            height: 8px;
+            background: rgba(255, 255, 255, 0.2);
+            border-radius: 4px;
+            overflow: hidden;
+            margin-top: 4px;
+        }
+        
+        .emotion-bar-fill {
+            height: 100%;
+            background: linear-gradient(90deg, #4ade80, #fbbf24, #ef4444);
+            transition: width 0.3s ease;
+        }
+        
+        .trend-indicator {
+            display: inline-block;
+            margin-left: 8px;
+            font-weight: bold;
+        }
+        
+        .trend-up {
+            color: #ef4444;
+        }
+        
+        .trend-down {
+            color: #4ade80;
+        }
+        
+        .trend-stable {
+            color: #fbbf24;
+        }
+        
+        @media (max-width: 1200px) {
+            .debug-panels {
+                grid-template-columns: 1fr;
+            }
+            
+            .debug-panel {
+                max-height: 400px;
+            }
+        }
     </style>
 </head>
 <body>
-    <div class="container">
+    <div class="main-container">
         <h1>🎙️ AI Voice Assistant</h1>
         <p class="subtitle">Psychologically Adaptive Conversation</p>
+        
+        <!-- Voice Selector -->
+        <div class="voice-selector">
+            <label for="voiceSelect">🎵 Select Voice:</label>
+            <select id="voiceSelect">
+                <option value="en-US-DragonV2.1Neural">Dragon V2.1 (Default)</option>
+                <option value="en-US-AvaMultilingualNeural">Ava Multilingual</option>
+                <option value="en-US-AndrewMultilingualNeural">Andrew Multilingual</option>
+                <option value="en-US-EmmaMultilingualNeural">Emma Multilingual</option>
+                <option value="en-US-BrianMultilingualNeural">Brian Multilingual</option>
+                <option value="en-IN-KavyaNeural">Kavya (Indian)</option>
+                <option value="en-IN-AnanyaNeural">Ananya (Indian)</option>
+                <option value="en-IN-AashiNeural">Aashi (Indian)</option>
+            </select>
+        </div>
         
         <div class="turn-info">
             Turn <span id="turnCount">0</span> 
@@ -585,6 +828,160 @@ class ConversationalAI:
             <div class="state-item">
                 <span class="state-label">STRESS</span>
                 <span class="state-value" id="stress">-</span>
+            </div>
+        </div>
+    </div>
+    
+    <!-- Debug & Monitoring Panels -->
+    <div class="debug-panels">
+        <!-- Model Outputs Panel -->
+        <div class="debug-panel">
+            <div class="panel-title">🤖 Model Outputs</div>
+            
+            <div class="section-header">🎤 ASR (Whisper)</div>
+            <div id="modelASR">
+                <div class="data-row">
+                    <span class="data-label">Transcript:</span>
+                    <span class="data-value">-</span>
+                </div>
+                <div class="data-row">
+                    <span class="data-label">Latency:</span>
+                    <span class="data-value">-</span>
+                </div>
+            </div>
+            
+            <div class="section-header">💭 Text Emotion (RoBERTa)</div>
+            <div id="modelTextEmotion">
+                <div class="data-row">
+                    <span class="data-label">No data yet</span>
+                </div>
+            </div>
+            
+            <div class="section-header">🎵 SER (Wav2Vec2)</div>
+            <div id="modelSER">
+                <div class="data-row">
+                    <span class="data-label">Angry:</span>
+                    <span class="data-value">0.00</span>
+                </div>
+                <div class="data-row">
+                    <span class="data-label">Happy:</span>
+                    <span class="data-value">0.00</span>
+                </div>
+                <div class="data-row">
+                    <span class="data-label">Neutral:</span>
+                    <span class="data-value">0.00</span>
+                </div>
+                <div class="data-row">
+                    <span class="data-label">Sad:</span>
+                    <span class="data-value">0.00</span>
+                </div>
+            </div>
+            
+            <div class="section-header">🔊 AST (Audio Events)</div>
+            <div id="modelAST">
+                <div class="data-row">
+                    <span class="data-label">No events detected</span>
+                </div>
+            </div>
+            
+            <div class="section-header">🎯 Fusion Output</div>
+            <div id="modelFusion">
+                <div class="data-row">
+                    <span class="data-label">Valence:</span>
+                    <span class="data-value">0.00</span>
+                </div>
+                <div class="data-row">
+                    <span class="data-label">Arousal:</span>
+                    <span class="data-value">0.00</span>
+                </div>
+                <div class="data-row">
+                    <span class="data-label">Stress:</span>
+                    <span class="data-value">0.00</span>
+                </div>
+                <div class="data-row">
+                    <span class="data-label">Clarity:</span>
+                    <span class="data-value">0.00</span>
+                </div>
+            </div>
+        </div>
+        
+        <!-- Memory & State Panel -->
+        <div class="debug-panel">
+            <div class="panel-title">🧠 Memory & State</div>
+            
+            <div class="section-header">📋 Session Info</div>
+            <div class="data-row">
+                <span class="data-label">Session ID:</span>
+                <span class="data-value" id="memSessionId">-</span>
+            </div>
+            <div class="data-row">
+                <span class="data-label">Turn Count:</span>
+                <span class="data-value" id="memTurnCount">0</span>
+            </div>
+            
+            <div class="section-header">🎯 Topic Tracking</div>
+            <div class="data-row">
+                <span class="data-label">Current Topic:</span>
+                <span class="data-value" id="memTopic">general</span>
+            </div>
+            <div class="data-row">
+                <span class="data-label">Confidence:</span>
+                <span class="data-value" id="memTopicConf">0%</span>
+            </div>
+            
+            <div class="section-header">📈 Emotional Trends</div>
+            <div class="data-row">
+                <span class="data-label">Mode:</span>
+                <span class="data-value" id="memMode">instant</span>
+            </div>
+            <div class="data-row">
+                <span class="data-label">Confidence:</span>
+                <span class="data-value" id="memModeConf">0%</span>
+            </div>
+            <div class="data-row">
+                <span class="data-label">Valence:</span>
+                <span>
+                    <span class="data-value" id="memValence">0.00</span>
+                    <span id="memValenceTrend" class="trend-indicator">→</span>
+                </span>
+            </div>
+            <div class="data-row">
+                <span class="data-label">Arousal:</span>
+                <span>
+                    <span class="data-value" id="memArousal">0.00</span>
+                    <span id="memArousalTrend" class="trend-indicator">→</span>
+                </span>
+            </div>
+            <div class="data-row">
+                <span class="data-label">Stress:</span>
+                <span>
+                    <span class="data-value" id="memStress">0.00</span>
+                    <span id="memStressTrend" class="trend-indicator">→</span>
+                </span>
+            </div>
+            <div class="data-row">
+                <span class="data-label">Clarity:</span>
+                <span>
+                    <span class="data-value" id="memClarity">0.00</span>
+                    <span id="memClarityTrend" class="trend-indicator">→</span>
+                </span>
+            </div>
+            
+            <div class="section-header">💬 Recent Turns (Buffer: 5)</div>
+            <div id="memRecentTurns">
+                <div class="data-row">
+                    <span class="data-label">No turns yet</span>
+                </div>
+            </div>
+            
+            <div class="section-header">🎭 Dialogue State</div>
+            <div class="data-row">
+                <span class="data-label">Recent Intents:</span>
+                <span class="data-value" id="memIntents">-</span>
+            </div>
+            <div class="data-row">
+                <span class="data-label">Coherence:</span>
+                <span class="data-value" id="memCoherence">1.00</span>
             </div>
         </div>
     </div>
@@ -647,6 +1044,208 @@ class ConversationalAI:
             }
         }
         
+        function updateMemoryView(data) {
+            if (!data.memory_view) return;
+            
+            const mem = data.memory_view;
+            
+            // Session Info
+            document.getElementById('memSessionId').textContent = mem.session_id.substring(0, 15) + '...';
+            document.getElementById('memTurnCount').textContent = mem.dialogue_state.turn_count;
+            
+            // Topic Tracking
+            document.getElementById('memTopic').textContent = mem.topic_info.current_topic;
+            document.getElementById('memTopicConf').textContent = (mem.topic_info.confidence * 100).toFixed(0) + '%';
+            
+            // Emotional Trends
+            document.getElementById('memMode').textContent = mem.emotional_trends.mode;
+            document.getElementById('memModeConf').textContent = (mem.emotional_trends.confidence * 100).toFixed(0) + '%';
+            
+            // Valence
+            const valence = mem.emotional_trends.valence;
+            document.getElementById('memValence').textContent = valence.current.toFixed(2);
+            updateTrendIndicator('memValenceTrend', valence.trend);
+            
+            // Arousal
+            const arousal = mem.emotional_trends.arousal;
+            document.getElementById('memArousal').textContent = arousal.current.toFixed(2);
+            updateTrendIndicator('memArousalTrend', arousal.trend);
+            
+            // Stress
+            const stress = mem.emotional_trends.stress;
+            document.getElementById('memStress').textContent = stress.current.toFixed(2);
+            updateTrendIndicator('memStressTrend', stress.trend);
+            
+            // Clarity
+            const clarity = mem.emotional_trends.clarity;
+            document.getElementById('memClarity').textContent = clarity.current.toFixed(2);
+            updateTrendIndicator('memClarityTrend', clarity.trend);
+            
+            // Recent Turns
+            const turnsContainer = document.getElementById('memRecentTurns');
+            if (mem.recent_turns.length > 0) {
+                turnsContainer.innerHTML = mem.recent_turns.map((turn, idx) => `
+                    <div style="margin-bottom: 12px; padding: 8px; background: rgba(255,255,255,0.05); border-radius: 5px; border-left: 3px solid #60a5fa;">
+                        <div style="font-size: 11px; opacity: 0.7; margin-bottom: 4px;">
+                            Turn ${data.turn_count - mem.recent_turns.length + idx + 1} | ${turn.topic}
+                        </div>
+                        <div style="font-size: 12px; margin-bottom: 2px;">
+                            👤 ${turn.user}
+                        </div>
+                        <div style="font-size: 12px; color: #4ade80;">
+                            🤖 ${turn.ai}
+                        </div>
+                    </div>
+                `).join('');
+            }
+            
+            // Dialogue State
+            if (mem.dialogue_state.recent_intents.length > 0) {
+                document.getElementById('memIntents').textContent = mem.dialogue_state.recent_intents.slice(-3).join(', ');
+            }
+            document.getElementById('memCoherence').textContent = mem.dialogue_state.coherence_score.toFixed(2);
+        }
+        
+        function updateTrendIndicator(elementId, trend) {
+            const element = document.getElementById(elementId);
+            if (trend > 0.05) {
+                element.textContent = '↗️';
+                element.className = 'trend-indicator trend-up';
+            } else if (trend < -0.05) {
+                element.textContent = '↘️';
+                element.className = 'trend-indicator trend-down';
+            } else {
+                element.textContent = '→';
+                element.className = 'trend-indicator trend-stable';
+            }
+        }
+        
+        function updateModelOutputs(data) {
+            if (!data.model_outputs) return;
+            
+            const models = data.model_outputs;
+            
+            // ASR Output
+            if (models.asr) {
+                document.getElementById('modelASR').innerHTML = `
+                    <div class="data-row">
+                        <span class="data-label">Transcript:</span>
+                        <span class="data-value">${models.asr.transcript.substring(0, 50)}...</span>
+                    </div>
+                    <div class="data-row">
+                        <span class="data-label">Latency:</span>
+                        <span class="data-value">${models.asr.latency_ms.toFixed(0)}ms</span>
+                    </div>
+                `;
+            }
+            
+            // Text Emotion Output
+            if (models.text_emotion && models.text_emotion.top_emotions) {
+                const emotions = models.text_emotion.top_emotions;
+                let html = '';
+                for (const [emotion, score] of Object.entries(emotions)) {
+                    html += `
+                        <div class="data-row">
+                            <span class="data-label">${emotion}:</span>
+                            <span class="data-value">${(score * 100).toFixed(1)}%</span>
+                        </div>
+                        <div class="emotion-bar">
+                            <div class="emotion-bar-fill" style="width: ${score * 100}%"></div>
+                        </div>
+                    `;
+                }
+                document.getElementById('modelTextEmotion').innerHTML = html;
+            }
+            
+            // SER Output
+            if (models.audio_analysis && models.audio_analysis.ser) {
+                const ser = models.audio_analysis.ser;
+                document.getElementById('modelSER').innerHTML = `
+                    <div class="data-row">
+                        <span class="data-label">Angry:</span>
+                        <span class="data-value">${(ser.angry * 100).toFixed(1)}%</span>
+                    </div>
+                    <div class="emotion-bar">
+                        <div class="emotion-bar-fill" style="width: ${ser.angry * 100}%"></div>
+                    </div>
+                    <div class="data-row">
+                        <span class="data-label">Happy:</span>
+                        <span class="data-value">${(ser.happy * 100).toFixed(1)}%</span>
+                    </div>
+                    <div class="emotion-bar">
+                        <div class="emotion-bar-fill" style="width: ${ser.happy * 100}%"></div>
+                    </div>
+                    <div class="data-row">
+                        <span class="data-label">Neutral:</span>
+                        <span class="data-value">${(ser.neutral * 100).toFixed(1)}%</span>
+                    </div>
+                    <div class="emotion-bar">
+                        <div class="emotion-bar-fill" style="width: ${ser.neutral * 100}%"></div>
+                    </div>
+                    <div class="data-row">
+                        <span class="data-label">Sad:</span>
+                        <span class="data-value">${(ser.sad * 100).toFixed(1)}%</span>
+                    </div>
+                    <div class="emotion-bar">
+                        <div class="emotion-bar-fill" style="width: ${ser.sad * 100}%"></div>
+                    </div>
+                    <div class="data-row">
+                        <span class="data-label">Latency:</span>
+                        <span class="data-value">${models.audio_analysis.latency_ms.toFixed(0)}ms</span>
+                    </div>
+                `;
+            }
+            
+            // AST Output
+            if (models.audio_analysis && models.audio_analysis.ast) {
+                const ast = models.audio_analysis.ast;
+                if (Object.keys(ast).length > 0) {
+                    let html = '';
+                    for (const [event, score] of Object.entries(ast)) {
+                        html += `
+                            <div class="data-row">
+                                <span class="data-label">${event}:</span>
+                                <span class="data-value">${(score * 100).toFixed(1)}%</span>
+                            </div>
+                            <div class="emotion-bar">
+                                <div class="emotion-bar-fill" style="width: ${score * 100}%"></div>
+                            </div>
+                        `;
+                    }
+                    document.getElementById('modelAST').innerHTML = html;
+                } else {
+                    document.getElementById('modelAST').innerHTML = `
+                        <div class="data-row">
+                            <span class="data-label">No events detected</span>
+                        </div>
+                    `;
+                }
+            }
+            
+            // Fusion Output
+            if (models.fusion && models.fusion.instant_state) {
+                const state = models.fusion.instant_state;
+                document.getElementById('modelFusion').innerHTML = `
+                    <div class="data-row">
+                        <span class="data-label">Valence:</span>
+                        <span class="data-value">${state.valence.toFixed(3)}</span>
+                    </div>
+                    <div class="data-row">
+                        <span class="data-label">Arousal:</span>
+                        <span class="data-value">${state.arousal.toFixed(3)}</span>
+                    </div>
+                    <div class="data-row">
+                        <span class="data-label">Stress:</span>
+                        <span class="data-value">${state.stress.toFixed(3)}</span>
+                    </div>
+                    <div class="data-row">
+                        <span class="data-label">Clarity:</span>
+                        <span class="data-value">${state.clarity.toFixed(3)}</span>
+                    </div>
+                `;
+            }
+        }
+        
         async function startRecording() {
             if (isRecording) return;
             
@@ -683,6 +1282,8 @@ class ConversationalAI:
                         response.textContent = data.llm_reply;
                         
                         updateState(data);
+                        updateMemoryView(data);
+                        updateModelOutputs(data);
                         
                         if (data.tts_audio) {
                             const audioData = atob(data.tts_audio);
@@ -770,9 +1371,12 @@ class ConversationalAI:
                         )
                     );
                     
+                    const selectedVoice = document.getElementById('voiceSelect').value;
+                    
                     ws.send(JSON.stringify({ 
                         audio: base64Audio,
-                        session_id: sessionId
+                        session_id: sessionId,
+                        voice_name: selectedVoice
                     }));
                     
                     stream.getTracks().forEach(track => track.stop());
@@ -829,13 +1433,15 @@ class ConversationalAI:
                 
                 audio_base64 = data['audio']
                 session_id = data['session_id']
+                voice_name = data.get('voice_name', 'en-US-DragonV2.1Neural')
                 
-                print(f"📥 Session: {session_id}")
+                print(f"📥 Session: {session_id}, Voice: {voice_name}")
                 
                 # Process conversation turn
                 result = await self.process_conversation_turn.remote.aio(
                     audio_base64,
-                    session_id
+                    session_id,
+                    voice_name
                 )
                 
                 await websocket.send_json(result)

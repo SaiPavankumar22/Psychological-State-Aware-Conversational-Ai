@@ -15,7 +15,19 @@ import azure.cognitiveservices.speech as speechsdk
 
 AZURE_TTS_KEY = os.getenv("AZURE_TTS_KEY")
 AZURE_REGION = os.getenv("AZURE_TTS_REGION", "centralindia")
-VOICE_NAME = os.getenv("AZURE_TTS_VOICE", "en-US-JennyNeural")
+DEFAULT_VOICE_NAME = "en-US-DragonV2.1Neural"
+
+# Available voices for frontend selection
+AVAILABLE_VOICES = [
+    "en-US-DragonV2.1Neural",
+    "en-US-AvaMultilingualNeural",
+    "en-US-AndrewMultilingualNeural",
+    "en-US-EmmaMultilingualNeural",
+    "en-US-BrianMultilingualNeural",
+    "en-IN-KavyaNeural",
+    "en-IN-AnanyaNeural",
+    "en-IN-AashiNeural",
+]
 
 AUDIO_FORMAT = speechsdk.SpeechSynthesisOutputFormat.Riff16Khz16BitMonoPcm
 
@@ -377,8 +389,21 @@ def compute_tts_params_from_trends(adaptive_state: Dict) -> Dict:
 # AZURE SYNTHESIS
 # =====================================================
 
-def synthesize_azure_tts(text: str, tts_params: Dict, output_dir: str) -> str:
-    """Synthesize speech using Azure TTS with SSML parameters"""
+def synthesize_azure_tts(
+    text: str, 
+    tts_params: Dict, 
+    output_dir: str,
+    voice_name: str = DEFAULT_VOICE_NAME
+) -> str:
+    """
+    Synthesize speech using Azure TTS with SSML parameters.
+    
+    Args:
+        text: Text to synthesize
+        tts_params: TTS parameters (style, rate, pitch, etc.)
+        output_dir: Directory to save audio
+        voice_name: Voice to use (default: en-US-DragonV2.1Neural)
+    """
     os.makedirs(output_dir, exist_ok=True)
     output_file = os.path.join(output_dir, f"tts_{uuid.uuid4().hex}.wav")
 
@@ -395,7 +420,7 @@ def synthesize_azure_tts(text: str, tts_params: Dict, output_dir: str) -> str:
  xmlns="http://www.w3.org/2001/10/synthesis"
  xmlns:mstts="http://www.w3.org/2001/mstts"
  xml:lang="en-US">
- <voice name="{VOICE_NAME}">
+ <voice name="{voice_name}">
   <mstts:express-as style="{tts_params['style']}"
    styledegree="{tts_params['styledegree']}">
    <prosody rate="{tts_params['rate']}"
