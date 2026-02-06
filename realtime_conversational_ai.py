@@ -1,12 +1,11 @@
-# realtime_conversational_ai.py
+# realtime_conversational_ai.py (FIXED)
 
 import asyncio
 import tempfile
-import wave
 import os
 import json
 import base64
-from pathlib import Path
+from typing import Dict
 import modal
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
@@ -35,13 +34,58 @@ image = (
         "soundfile",
         extra_index_url="https://download.pytorch.org/whl/cu121",
     )
-    .add_local_dir(".", remote_path="/root")
+    .add_local_file("fusion.py", remote_path="/root/fusion.py")
+    .add_local_file("emotional_trends.py", remote_path="/root/emotional_trends.py")
+    .add_local_file("conversation_state.py", remote_path="/root/conversation_state.py")
+    .add_local_file("memory_manager.py", remote_path="/root/memory_manager.py")
+    .add_local_file("tts_azure.py", remote_path="/root/tts_azure.py")
+    .add_local_file("llm_client.py", remote_path="/root/llm_client.py")
+    .add_local_file("services.py", remote_path="/root/services.py")
 )
+
+# =====================================================
+# PERSISTENT SESSION STORAGE (Modal Dict)
+# =====================================================
+persistent_sessions = modal.Dict.from_name("conversation-sessions", create_if_missing=True)
+
+def get_session(session_id: str) -> Dict:
+    """Get or create session state with persistence"""
+    try:
+        # Try to load existing session
+        session_data = persistent_sessions[session_id]
+        
+        # Deserialize state objects
+        from conversation_state import ConversationState
+        from emotional_trends import EmotionalStateTracker
+        from tts_azure import TTSController
+        
+        return {
+            "conversation": ConversationState.from_dict(session_data["conversation"]),
+            "emotional_tracker": EmotionalStateTracker.from_dict(session_data["emotional_tracker"]),
+            "tts_controller": TTSController(),  # Fresh controller (stateless enough)
+        }
+    except KeyError:
+        # Create new session
+        from conversation_state import ConversationState
+        from emotional_trends import EmotionalStateTracker
+        from tts_azure import TTSController
+        
+        return {
+            "conversation": ConversationState(session_id=session_id),
+            "emotional_tracker": EmotionalStateTracker(),
+            "tts_controller": TTSController(),
+        }
+
+def save_session(session_id: str, session: Dict):
+    """Save session state to persistent storage"""
+    persistent_sessions[session_id] = {
+        "conversation": session["conversation"].to_dict(),
+        "emotional_tracker": session["emotional_tracker"].to_dict(),
+    }
 
 # =====================================================
 # AUDIO UTILITIES
 # =====================================================
-TARGET_SAMPLE_RATE = 16000
 
 def webm_to_wav(webm_bytes, output_path: str) -> str:
     """Convert WebM audio to WAV using ffmpeg"""
@@ -49,11 +93,9 @@ def webm_to_wav(webm_bytes, output_path: str) -> str:
     
     webm_temp = output_path.replace('.wav', '.webm')
     
-    # Write WebM bytes to temp file
     with open(webm_temp, 'wb') as f:
         f.write(webm_bytes)
     
-    # Convert using ffmpeg
     cmd = [
         'ffmpeg', '-y', '-i', webm_temp,
         '-ar', '16000',
@@ -70,12 +112,13 @@ def webm_to_wav(webm_bytes, output_path: str) -> str:
 # =====================================================
 # MODAL CLASS - GPU BACKEND
 # =====================================================
+
 @app.cls(
     image=image,
     gpu="A10G",
     timeout=3600,
     secrets=[modal.Secret.from_name("emotion-env")],
-    scaledown_window=300,  # Keep warm for 5 minutes (FIXED)
+    scaledown_window=600,
 )
 class ConversationalAI:
     
@@ -86,52 +129,57 @@ class ConversationalAI:
         
         from services import ASRTextService, AudioEmotionService
         from fusion import PsychologicalFusion
+        from memory_manager import MemoryManager
         
         self.asr_service = ASRTextService()
         self.audio_service = AudioEmotionService()
         self.fusion = PsychologicalFusion()
+        self.memory_mgr = MemoryManager()  # ✅ Single instance per container
         
         print("✅ All models loaded successfully")
     
     @modal.method()
-    async def process_audio_chunk(self, audio_data: str) -> dict:  # FIXED: string instead of bytes
-        """
-        Process a single audio chunk through the entire pipeline
-        audio_data: base64 encoded audio bytes
-        Returns: dict with state, transcript, reply, and TTS audio
-        """
+    async def process_conversation_turn(
+        self, 
+        audio_data: str,
+        session_id: str
+    ) -> dict:
+        """Process a conversation turn with full state management"""
         import asyncio
         from llm_client import psychological_llm_response
         from tts_azure import synthesize_azure_tts
-        from fusion import azure_tts_input
         from services import SER_LABELS
         
-        # Decode base64 audio
-        audio_bytes = base64.b64decode(audio_data)
-        print(f"📥 Received {len(audio_bytes)} bytes of audio")
+        # ✅ Load session state (from persistent storage)
+        session = get_session(session_id)
+        conv_state = session["conversation"]
+        emotional_tracker = session["emotional_tracker"]
+        tts_controller = session["tts_controller"]
         
-        # Create temp file
+        # Decode audio
+        audio_bytes = base64.b64decode(audio_data)
+        print(f"🔥 Turn {conv_state.dialogue_state.turn_count + 1} - {len(audio_bytes)} bytes")
+        
         with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp_file:
             wav_path = tmp_file.name
         
         try:
-            # Convert WebM to WAV
+            # Convert audio
             webm_to_wav(audio_bytes, wav_path)
-            print(f"✅ Audio converted to WAV: {wav_path}")
             
-            # Run ASR + Text Emotion and Audio Analysis in parallel
-            print("🔄 Running parallel analysis...")
+            # === PARALLEL ANALYSIS ===
             asr_task = asyncio.to_thread(self.asr_service.run, wav_path)
             audio_task = asyncio.to_thread(self.audio_service.run, wav_path)
             
             asr_result, audio_result = await asyncio.gather(asr_task, audio_task)
             
-            print(f"📝 Transcript: {asr_result['transcript']}")
+            transcript = asr_result['transcript']
+            print(f"📝 Transcript: {transcript}")
             
-            # Fusion
+            # === FUSION ===
             ser_dict = dict(zip(SER_LABELS, audio_result["ser"]))
             
-            psychological_state = self.fusion.fuse(
+            instant_psychological_state = self.fusion.fuse(
                 text=asr_result["text_emotion"],
                 ser=ser_dict,
                 ast=audio_result["ast"],
@@ -142,21 +190,66 @@ class ConversationalAI:
                 },
             )
             
-            print(f"🧠 Psychological State: {psychological_state}")
+            print(f"🎭 Instant State: valence={instant_psychological_state['valence']:.2f}, "
+                  f"stress={instant_psychological_state['stress']:.2f}")
             
-            # Generate LLM response
-            print("🤖 Generating LLM response...")
-            llm_reply = await asyncio.to_thread(
-                psychological_llm_response,
-                asr_result["transcript"],
-                psychological_state
+            # === UPDATE EMOTIONAL TRENDS ===
+            emotional_tracker.update(instant_psychological_state)
+            adaptive_state = emotional_tracker.get_adaptive_state()
+            
+            print(f"🧠 Mode: {adaptive_state['mode']}, Confidence: {adaptive_state.get('confidence', 0):.2f}")
+            print(f"📊 Adaptive State: valence={adaptive_state['valence']:.2f}, "
+                  f"stress={adaptive_state['stress']:.2f}")
+            
+            # === MEMORY & TOPIC DETECTION ===
+            topic_shifted, new_topic, topic_confidence = self.memory_mgr.update_topic(transcript)
+            
+            if topic_shifted:
+                conv_state.dialogue_state.update_topic(new_topic, topic_confidence)
+                print(f"📌 Topic shift: {new_topic} (confidence: {topic_confidence:.2f})")
+            
+            # Detect emotional shifts
+            emotional_shift_detected, shift_dimension = emotional_tracker.detect_major_shift()
+            emotional_shift_magnitude = (
+                abs(emotional_tracker.dimensions[shift_dimension].get_normalized_trend()) 
+                if shift_dimension else 0.0
             )
             
-            print(f"💬 LLM Reply: {llm_reply}")
+            if emotional_shift_detected:
+                print(f"⚡ Emotional shift detected in {shift_dimension}: {emotional_shift_magnitude:.2f}")
             
-            # Generate TTS with emotional parameters
-            print("🔊 Generating TTS...")
-            tts_params = azure_tts_input(psychological_state)
+            # === EVENT-DRIVEN MEMORY RETRIEVAL ===
+            should_retrieve, retrieval_reason = self.memory_mgr.should_retrieve_memory(
+                user_query=transcript,
+                topic_changed=topic_shifted,
+                topic_confidence=topic_confidence,
+                emotional_shift_magnitude=emotional_shift_magnitude
+            )
+            
+            if should_retrieve:
+                print(f"🗄️ Memory retrieval triggered: {retrieval_reason}")
+                # TODO: Implement vector DB retrieval
+            
+            # === GET CONTEXT FOR LLM ===
+            llm_context = conv_state.get_context_for_llm()
+            
+            # === LLM RESPONSE ===
+            print("🤖 Generating response...")
+            llm_reply = await asyncio.to_thread(
+                psychological_llm_response,
+                transcript,
+                adaptive_state,
+                llm_context
+            )
+            
+            print(f"💬 Response: {llm_reply}")
+            
+            # === COMPUTE TTS PARAMS (Using session's controller) ===
+            tts_params = tts_controller.compute(adaptive_state)
+            print(f"🎵 TTS: style={tts_params['style']}, degree={tts_params['styledegree']}, "
+                  f"rate={tts_params['rate']}, pitch={tts_params['pitch']}")
+            
+            # === GENERATE TTS ===
             tts_audio_path = await asyncio.to_thread(
                 synthesize_azure_tts,
                 llm_reply,
@@ -164,34 +257,45 @@ class ConversationalAI:
                 "/tmp"
             )
             
-            # Read TTS audio
             with open(tts_audio_path, "rb") as f:
                 tts_audio_bytes = f.read()
             
-            print(f"✅ TTS generated: {len(tts_audio_bytes)} bytes")
-            
-            # Cleanup
             os.unlink(tts_audio_path)
             
+            # === UPDATE CONVERSATION STATE ===
+            conv_state.add_turn(
+                transcript, 
+                llm_reply, 
+                instant_psychological_state,
+                user_intent="unknown",
+                topic=conv_state.dialogue_state.primary_topic
+            )
+            
+            # === SAVE SESSION STATE ✅ ===
+            save_session(session_id, session)
+            
+            # === RETURN RESPONSE ===
             return {
-                "transcript": asr_result["transcript"],
-                "psychological_state": psychological_state,
+                "transcript": transcript,
                 "llm_reply": llm_reply,
                 "tts_audio": base64.b64encode(tts_audio_bytes).decode('utf-8'),
-                "latencies": {
-                    "asr": asr_result["latency"],
-                    "audio_analysis": audio_result["latency"],
-                }
+                "turn_count": conv_state.dialogue_state.turn_count,
+                "emotional_mode": adaptive_state['mode'],
+                "instant_state": instant_psychological_state,
+                "adaptive_state": {
+                    k: v for k, v in adaptive_state.items() 
+                    if k not in ['trends', 'stability']
+                },
+                "tts_params": tts_params,
             }
             
         except Exception as e:
-            print(f"❌ Error processing audio: {e}")
+            print(f"❌ Error: {e}")
             import traceback
             traceback.print_exc()
             raise
             
         finally:
-            # Cleanup temp file
             if os.path.exists(wav_path):
                 os.unlink(wav_path)
     
@@ -200,7 +304,6 @@ class ConversationalAI:
         """Create FastAPI app with WebSocket endpoint"""
         web_app = FastAPI(title="Conversational AI API")
         
-        # Add CORS middleware
         web_app.add_middleware(
             CORSMiddleware,
             allow_origins=["*"],
@@ -211,7 +314,7 @@ class ConversationalAI:
         
         @web_app.get("/")
         async def root():
-            """Serve Alexa-like interface"""
+            """Serve enhanced interface with start/stop controls"""
             html_content = """
 <!DOCTYPE html>
 <html lang="en">
@@ -239,7 +342,7 @@ class ConversationalAI:
         
         .container {
             text-align: center;
-            max-width: 700px;
+            max-width: 800px;
             width: 100%;
             padding: 40px;
         }
@@ -256,6 +359,45 @@ class ConversationalAI:
             margin-bottom: 30px;
         }
         
+        .controls {
+            display: flex;
+            justify-content: center;
+            gap: 20px;
+            margin: 30px 0;
+        }
+        
+        .btn {
+            padding: 15px 40px;
+            font-size: 18px;
+            border: none;
+            border-radius: 50px;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            font-weight: 600;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.2);
+        }
+        
+        .btn:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 6px 12px rgba(0,0,0,0.3);
+        }
+        
+        .btn:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+            transform: none;
+        }
+        
+        .btn-start {
+            background: #4ade80;
+            color: #1e293b;
+        }
+        
+        .btn-stop {
+            background: #ef4444;
+            color: white;
+        }
+        
         .assistant-ring {
             width: 200px;
             height: 200px;
@@ -266,14 +408,7 @@ class ConversationalAI:
             display: flex;
             justify-content: center;
             align-items: center;
-            cursor: pointer;
             transition: all 0.3s ease;
-            position: relative;
-        }
-        
-        .assistant-ring:hover {
-            transform: scale(1.05);
-            border-color: rgba(255, 255, 255, 0.6);
         }
         
         .assistant-ring.listening {
@@ -320,30 +455,16 @@ class ConversationalAI:
             font-weight: 500;
         }
         
-        .instructions {
+        .turn-info {
             background: rgba(255, 255, 255, 0.1);
-            padding: 20px;
-            border-radius: 10px;
-            margin: 20px 0;
-            backdrop-filter: blur(10px);
-        }
-        
-        .instructions h3 {
-            margin-bottom: 15px;
-            font-size: 20px;
-        }
-        
-        .instruction-steps {
-            text-align: left;
+            padding: 10px 20px;
+            border-radius: 20px;
             display: inline-block;
-        }
-        
-        .instruction-steps li {
             margin: 10px 0;
-            padding-left: 10px;
+            font-size: 14px;
         }
         
-        .transcript-box {
+        .transcript-box, .response-box {
             background: rgba(255, 255, 255, 0.1);
             padding: 20px;
             border-radius: 10px;
@@ -355,17 +476,11 @@ class ConversationalAI:
         
         .response-box {
             background: rgba(255, 255, 255, 0.15);
-            padding: 20px;
-            border-radius: 10px;
-            margin: 20px 0;
-            min-height: 80px;
-            backdrop-filter: blur(10px);
-            text-align: left;
         }
         
         .state-info {
             display: grid;
-            grid-template-columns: 1fr 1fr;
+            grid-template-columns: repeat(2, 1fr);
             gap: 10px;
             margin-top: 20px;
         }
@@ -374,7 +489,6 @@ class ConversationalAI:
             background: rgba(255, 255, 255, 0.1);
             padding: 15px;
             border-radius: 8px;
-            font-size: 14px;
         }
         
         .state-label {
@@ -389,6 +503,25 @@ class ConversationalAI:
             font-size: 18px;
         }
         
+        .mode-badge {
+            display: inline-block;
+            padding: 5px 15px;
+            border-radius: 20px;
+            font-size: 12px;
+            font-weight: 600;
+            margin-left: 10px;
+        }
+        
+        .mode-instant {
+            background: #fbbf24;
+            color: #1e293b;
+        }
+        
+        .mode-trend {
+            background: #60a5fa;
+            color: #1e293b;
+        }
+        
         .error {
             background: rgba(239, 68, 68, 0.2);
             color: #fecaca;
@@ -401,18 +534,17 @@ class ConversationalAI:
         .hidden {
             display: none;
         }
-        
-        @media (max-width: 768px) {
-            h1 { font-size: 36px; }
-            .assistant-ring { width: 150px; height: 150px; }
-            .mic-icon { font-size: 60px; }
-        }
     </style>
 </head>
 <body>
     <div class="container">
         <h1>🎙️ AI Voice Assistant</h1>
-        <p class="subtitle">Psychologically Adaptive AI Companion</p>
+        <p class="subtitle">Psychologically Adaptive Conversation</p>
+        
+        <div class="turn-info">
+            Turn <span id="turnCount">0</span> 
+            <span id="modeBadge" class="mode-badge mode-instant">Instant Mode</span>
+        </div>
         
         <div id="assistantRing" class="assistant-ring">
             <div class="mic-icon">🎤</div>
@@ -420,17 +552,12 @@ class ConversationalAI:
         
         <div class="status" id="status">Ready to listen</div>
         
-        <div id="errorBox" class="error hidden"></div>
-        
-        <div class="instructions">
-            <h3>📋 How to Use</h3>
-            <ol class="instruction-steps">
-                <li><strong>Click</strong> the microphone to start recording</li>
-                <li><strong>Speak</strong> naturally (it will auto-stop after 5 seconds of silence)</li>
-                <li><strong>Wait</strong> for the AI to process and respond</li>
-                <li><strong>Listen</strong> to the emotionally-adaptive response</li>
-            </ol>
+        <div class="controls">
+            <button id="startBtn" class="btn btn-start">Start Speaking</button>
+            <button id="stopBtn" class="btn btn-stop" disabled>Stop Speaking</button>
         </div>
+        
+        <div id="errorBox" class="error hidden"></div>
         
         <div class="transcript-box hidden" id="transcriptBox">
             <strong>You said:</strong>
@@ -444,11 +571,11 @@ class ConversationalAI:
         
         <div class="state-info hidden" id="stateInfo">
             <div class="state-item">
-                <span class="state-label">EMOTION (Valence)</span>
+                <span class="state-label">EMOTION</span>
                 <span class="state-value" id="valence">-</span>
             </div>
             <div class="state-item">
-                <span class="state-label">ENERGY (Arousal)</span>
+                <span class="state-label">ENERGY</span>
                 <span class="state-value" id="arousal">-</span>
             </div>
             <div class="state-item">
@@ -467,17 +594,25 @@ class ConversationalAI:
         let audioChunks = [];
         let ws;
         let isRecording = false;
-        let silenceTimeout;
         let stream;
+        let sessionId = generateSessionId();
         
         const ring = document.getElementById('assistantRing');
         const status = document.getElementById('status');
+        const startBtn = document.getElementById('startBtn');
+        const stopBtn = document.getElementById('stopBtn');
         const transcript = document.getElementById('transcript');
         const response = document.getElementById('response');
         const errorBox = document.getElementById('errorBox');
         const transcriptBox = document.getElementById('transcriptBox');
         const responseBox = document.getElementById('responseBox');
         const stateInfo = document.getElementById('stateInfo');
+        const turnCount = document.getElementById('turnCount');
+        const modeBadge = document.getElementById('modeBadge');
+        
+        function generateSessionId() {
+            return 'session_' + Math.random().toString(36).substring(2, 15);
+        }
         
         function showError(message) {
             errorBox.textContent = '❌ ' + message;
@@ -487,8 +622,10 @@ class ConversationalAI:
             }, 5000);
         }
         
-        function updateState(state) {
+        function updateState(data) {
             stateInfo.classList.remove('hidden');
+            
+            const state = data.adaptive_state;
             
             document.getElementById('valence').textContent = 
                 state.valence > 0 ? `😊 +${state.valence.toFixed(2)}` : `😔 ${state.valence.toFixed(2)}`;
@@ -498,21 +635,25 @@ class ConversationalAI:
                 `💡 ${(state.clarity * 100).toFixed(0)}%`;
             document.getElementById('stress').textContent = 
                 state.stress > 0.5 ? `😰 ${(state.stress * 100).toFixed(0)}%` : `😌 ${(state.stress * 100).toFixed(0)}%`;
+            
+            turnCount.textContent = data.turn_count;
+            
+            if (data.emotional_mode === 'trend') {
+                modeBadge.textContent = 'Trend Mode';
+                modeBadge.className = 'mode-badge mode-trend';
+            } else {
+                modeBadge.textContent = 'Instant Mode';
+                modeBadge.className = 'mode-badge mode-instant';
+            }
         }
         
         async function startRecording() {
-            if (isRecording) {
-                stopRecording();
-                return;
-            }
+            if (isRecording) return;
             
             try {
-                // Hide previous results
                 transcriptBox.classList.add('hidden');
                 responseBox.classList.add('hidden');
-                stateInfo.classList.add('hidden');
                 
-                // Connect WebSocket
                 const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
                 ws = new WebSocket(`${protocol}//${window.location.host}/ws/conversation`);
                 
@@ -528,25 +669,21 @@ class ConversationalAI:
                             showError(data.error);
                             ring.className = 'assistant-ring';
                             status.textContent = 'Ready to listen';
+                            startBtn.disabled = false;
+                            stopBtn.disabled = true;
                             return;
                         }
                         
-                        console.log('📨 Received response:', data);
+                        console.log('📨 Received:', data);
                         
-                        // Show transcript
                         transcriptBox.classList.remove('hidden');
-                        transcript.textContent = data.transcript || 'No speech detected';
+                        transcript.textContent = data.transcript;
                         
-                        // Show response
                         responseBox.classList.remove('hidden');
-                        response.textContent = data.llm_reply || 'No response generated';
+                        response.textContent = data.llm_reply;
                         
-                        // Update psychological state
-                        if (data.psychological_state) {
-                            updateState(data.psychological_state);
-                        }
+                        updateState(data);
                         
-                        // Play TTS audio
                         if (data.tts_audio) {
                             const audioData = atob(data.tts_audio);
                             const audioArray = new Uint8Array(audioData.length);
@@ -565,33 +702,36 @@ class ConversationalAI:
                             audio.onended = () => {
                                 ring.className = 'assistant-ring';
                                 status.textContent = 'Ready to listen';
+                                startBtn.disabled = false;
+                                stopBtn.disabled = true;
                                 ws.close();
                             };
                         } else {
                             ring.className = 'assistant-ring';
                             status.textContent = 'Ready to listen';
+                            startBtn.disabled = false;
+                            stopBtn.disabled = true;
                             ws.close();
                         }
                     } catch (e) {
-                        console.error('Error parsing message:', e);
-                        showError('Error processing response: ' + e.message);
+                        console.error('Error:', e);
+                        showError('Error processing response');
                         ring.className = 'assistant-ring';
                         status.textContent = 'Ready to listen';
+                        startBtn.disabled = false;
+                        stopBtn.disabled = true;
                     }
                 };
                 
                 ws.onerror = (error) => {
-                    console.error('❌ WebSocket error:', error);
-                    showError('Connection error. Please try again.');
+                    console.error('WebSocket error:', error);
+                    showError('Connection error');
                     ring.className = 'assistant-ring';
                     status.textContent = 'Ready to listen';
+                    startBtn.disabled = false;
+                    stopBtn.disabled = true;
                 };
                 
-                ws.onclose = () => {
-                    console.log('WebSocket closed');
-                };
-                
-                // Start recording
                 stream = await navigator.mediaDevices.getUserMedia({ 
                     audio: {
                         channelCount: 1,
@@ -621,9 +761,8 @@ class ConversationalAI:
                     console.log(`📤 Sending ${arrayBuffer.byteLength} bytes`);
                     
                     ring.className = 'assistant-ring processing';
-                    status.textContent = '🤔 Processing your speech...';
+                    status.textContent = '🤔 Processing...';
                     
-                    // Convert to base64 and send as JSON
                     const base64Audio = btoa(
                         new Uint8Array(arrayBuffer).reduce(
                             (data, byte) => data + String.fromCharCode(byte),
@@ -631,9 +770,11 @@ class ConversationalAI:
                         )
                     );
                     
-                    ws.send(JSON.stringify({ audio: base64Audio }));
+                    ws.send(JSON.stringify({ 
+                        audio: base64Audio,
+                        session_id: sessionId
+                    }));
                     
-                    // Stop all tracks
                     stream.getTracks().forEach(track => track.stop());
                 };
                 
@@ -641,20 +782,17 @@ class ConversationalAI:
                 isRecording = true;
                 
                 ring.className = 'assistant-ring listening';
-                status.textContent = '🎙️ Listening... (will auto-stop)';
-                
-                // Auto-stop after 10 seconds (max recording time)
-                setTimeout(() => {
-                    if (isRecording) {
-                        stopRecording();
-                    }
-                }, 10000);
+                status.textContent = '🎙️ Listening... (click Stop when done)';
+                startBtn.disabled = true;
+                stopBtn.disabled = false;
                 
             } catch (error) {
-                console.error('Error starting recording:', error);
-                showError('Microphone access denied. Please allow microphone access.');
+                console.error('Error:', error);
+                showError('Microphone access denied');
                 ring.className = 'assistant-ring';
                 status.textContent = 'Ready to listen';
+                startBtn.disabled = false;
+                stopBtn.disabled = true;
             }
         }
         
@@ -663,21 +801,11 @@ class ConversationalAI:
             
             mediaRecorder.stop();
             isRecording = false;
-            
-            clearTimeout(silenceTimeout);
+            stopBtn.disabled = true;
         }
         
-        ring.addEventListener('click', () => {
-            startRecording();
-        });
-        
-        // Keyboard shortcut: Space bar to toggle recording
-        document.addEventListener('keydown', (e) => {
-            if (e.code === 'Space' && !e.repeat) {
-                e.preventDefault();
-                startRecording();
-            }
-        });
+        startBtn.addEventListener('click', startRecording);
+        stopBtn.addEventListener('click', stopRecording);
     </script>
 </body>
 </html>
@@ -686,27 +814,30 @@ class ConversationalAI:
         
         @web_app.websocket("/ws/conversation")
         async def conversation_endpoint(websocket: WebSocket):
-            """WebSocket endpoint for real-time conversation"""
+            """WebSocket endpoint for continuous conversation"""
             await websocket.accept()
-            print("✅ WebSocket connection established")
+            print("✅ WebSocket connected")
             
             try:
-                # Receive audio data as JSON
                 message = await websocket.receive_text()
                 data = json.loads(message)
                 
-                if 'audio' not in data:
-                    await websocket.send_json({"error": "No audio data in message"})
+                if 'audio' not in data or 'session_id' not in data:
+                    await websocket.send_json({"error": "Missing audio or session_id"})
                     await websocket.close()
                     return
                 
                 audio_base64 = data['audio']
-                print(f"📥 Received audio data (base64 length: {len(audio_base64)})")
+                session_id = data['session_id']
                 
-                # Process the audio
-                result = await self.process_audio_chunk.remote.aio(audio_base64)
+                print(f"📥 Session: {session_id}")
                 
-                # Send result back
+                # Process conversation turn
+                result = await self.process_conversation_turn.remote.aio(
+                    audio_base64,
+                    session_id
+                )
+                
                 await websocket.send_json(result)
                 print("✅ Response sent")
                 
@@ -727,94 +858,3 @@ class ConversationalAI:
                     pass
         
         return web_app
-
-"""
-```
-
-## 🎯 How to Use the Interface (Step-by-Step)
-
-### **Simple 1-Click Interaction (Like Alexa)**
-
-1. **Click the Microphone** 🎤
-   - The ring turns **GREEN** and starts pulsing
-   - Status shows: "🎙️ Listening... (will auto-stop)"
-
-2. **Speak Naturally** 🗣️
-   - Just talk like you would to Alexa
-   - Example: "Hello, how are you today?"
-   - Example: "I'm feeling stressed about work"
-   - Example: "Tell me a joke"
-
-3. **It Auto-Stops** ⏸️
-   - After you finish speaking, wait a moment
-   - OR it will auto-stop after 10 seconds maximum
-   - NO need to click stop button!
-
-4. **Processing Happens** 🤔
-   - Ring turns **YELLOW** and spins
-   - Status shows: "🤔 Processing your speech..."
-   - This takes 5-15 seconds
-
-5. **AI Responds** 🔊
-   - Ring turns **BLUE** and pulses
-   - Status shows: "🔊 Speaking..."
-   - You'll see:
-     - What you said (transcript)
-     - AI's reply (text)
-     - Your emotional state (valence, arousal, clarity, stress)
-   - Audio plays automatically
-
-6. **Ready for Next Turn** 🔄
-   - After audio finishes, status shows: "Ready to listen"
-   - Click microphone again to continue conversation
-
-### **Alternative: Keyboard Shortcut**
-
-- Press **SPACEBAR** to start/stop recording
-- Same behavior as clicking the microphone
-
-## 📋 Example Conversations
-
-### **Example 1: Happy Greeting**
-```
-You: "Hey! I'm so excited about my new project!"
-
-AI detects:
-- Valence: +0.7 (positive)
-- Arousal: 0.6 (high energy)
-- Clarity: 0.8 (clear)
-- Stress: 0.2 (low)
-
-AI responds (cheerful style):
-"That's wonderful to hear! I can tell you're really enthusiastic 
-about it. What's your new project about?"
-```
-
-### **Example 2: Stressed User**
-```
-You: "I'm so overwhelmed... I don't know what to do..."
-
-AI detects:
-- Valence: -0.6 (negative)
-- Arousal: 0.7 (high energy)
-- Clarity: 0.3 (confused)
-- Stress: 0.8 (high)
-
-AI responds (calm, soothing style):
-"I can hear that you're feeling stressed. Take a deep breath. 
-Would you like to talk through what's overwhelming you?"
-```
-
-### **Example 3: Neutral Question**
-```
-You: "What's the weather like today?"
-
-AI detects:
-- Valence: 0.0 (neutral)
-- Arousal: 0.3 (low energy)
-- Clarity: 0.9 (very clear)
-- Stress: 0.1 (calm)
-
-AI responds (professional style):
-"I don't have access to current weather data, but I'd be 
-happy to help you with something else!"""

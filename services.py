@@ -80,6 +80,7 @@ class ASRTextService:
             transcript_resp = self.client.audio.transcriptions.create(
                 file=audio_file,
                 model="whisper-1",
+                language="en",  # Strict English only
                 response_format="verbose_json",
             )
 
