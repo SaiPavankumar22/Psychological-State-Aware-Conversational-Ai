@@ -136,7 +136,7 @@ class ConversationState:
     def __init__(
         self,
         session_id: str,
-        max_recent_turns: int = 5,
+        max_recent_turns: int = 8,
         summary_update_interval: int = 5
     ):
         self.session_id = session_id

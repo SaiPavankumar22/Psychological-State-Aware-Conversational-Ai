@@ -634,6 +634,16 @@ Default: "friendly"
 
 #### **Frontend Interface**
 
+**Session Sidebar (ChatGPT-like):**
+- 🆕 **New Chat** button: Create fresh session
+- 📚 **Session List**: All conversations sorted by recency
+  - Session title (auto-generated from first message)
+  - Last updated timestamp
+  - Turn count
+  - Active session highlighting
+- 🗑️ **Delete button**: Remove unwanted sessions
+- 📱 **Responsive**: Adapts to mobile screens (top bar on small devices)
+
 **Main UI:**
 - Voice selector dropdown (8 voices)
 - Animated microphone ring (listening/processing/speaking states)
@@ -650,6 +660,7 @@ Default: "friendly"
 - 💭 Text Emotion: Top 5 emotions with bars
 - 🎵 SER: 4-class probabilities with bars
 - 🔊 AST: Top 5 audio events with bars
+- 🎵 **Acoustic Features (Dynamic)**: Speech rate (WPS), pause duration, jitter, word count, audio duration
 - 🎯 Fusion: Instant state (4 dimensions)
 
 **Right Panel: Memory & State**
@@ -673,6 +684,34 @@ Default: "friendly"
 - Processing: 16 kHz mono WAV
 - Conversion: ffmpeg
 - Format: PCM 16-bit
+
+### **Dynamic Acoustic Feature Extraction**
+
+**Speech Rate:**
+- Metric: Words per second (WPS)
+- Calculation: `word_count / audio_duration`
+- Typical range: 2-5 WPS (conversational)
+- Uses: Actual transcript and audio file duration
+
+**Pause Duration:**
+- Detection: RMS energy threshold (bottom 20% = silence)
+- Minimum pause: 0.3 seconds (ignore short gaps)
+- Calculation: Average of all detected pauses
+- Uses: Librosa RMS energy analysis
+
+**Jitter (Voice Stability):**
+- Definition: Pitch variability/instability
+- Method: YIN algorithm for F0 extraction
+- Calculation: `std(pitch) / mean(pitch)` (normalized)
+- Range: [0, 1] (0 = very stable, 1 = very unstable)
+- Typical: 0.01-0.15 for normal speech
+- Uses: Librosa YIN pitch tracker
+
+**Why Dynamic?**
+- Reflects actual user vocal behavior (fast/slow speech, long pauses, voice tremor)
+- Improves emotional estimation accuracy
+- Captures stress, anxiety, hesitation, excitement in real-time
+- No hardcoded assumptions about user's speaking style
 
 ### **GPU Requirements**
 - NVIDIA GPU with CUDA 12.1 support
@@ -760,7 +799,11 @@ https://{your-username}--conversational-ai-realtime-fastapi-app.modal.run
 - Text-based: 20 psychological emotions
 - Voice-based: 4 speech emotions (angry, happy, neutral, sad)
 - Audio events: 22 categories (laughter, crying, screaming, etc.)
-- Prosodic: Speech rate, pauses, jitter
+- **Prosodic Features (DYNAMIC)**: 
+  - Speech rate: Computed from transcript word count / audio duration
+  - Pause duration: Detected from audio silence (threshold: 0.3s)
+  - Jitter: Voice pitch instability (normalized std of F0)
+  - All features extracted in real-time from actual audio (no hardcoded values)
 
 ### **2. Psychological State Fusion**
 - Weighted fusion of 3 modalities
@@ -804,6 +847,16 @@ https://{your-username}--conversational-ai-realtime-fastapi-app.modal.run
 - 8 voice options (US English + Indian English)
 - User-selectable in frontend
 - Default: Dragon V2.1 Neural
+
+### **9. Session Management (ChatGPT-like)**
+- **Create new sessions**: Start fresh conversations with one click
+- **Access old sessions**: Browse conversation history in sidebar
+- **Delete sessions**: Remove unwanted conversations
+- **Session metadata**: Auto-generated titles, timestamps, turn counts
+- **Persistent storage**: All sessions saved to Modal Dict
+- **Sidebar UI**: Intuitive history panel with session list
+- **Active session highlighting**: Visual indicator for current conversation
+- **Mobile responsive**: Sidebar adapts to small screens
 
 ### **9. Real-Time Monitoring**
 - Model outputs view (ASR, Text, SER, AST, Fusion)
@@ -965,6 +1018,13 @@ Stress: quadrant=0.4, jitter=0.3, environment=0.3
       "ser": {...},
       "ast": {...}
     },
+    "acoustic_features": {
+      "speech_rate": float,        # Words per second
+      "pause_duration": float,     # Average pause length (seconds)
+      "jitter": float,             # Pitch instability [0-1]
+      "word_count": int,
+      "audio_duration": float
+    },
     "fusion": {...}
   },
   "memory_view": {
@@ -991,6 +1051,47 @@ Stress: quadrant=0.4, jitter=0.3, environment=0.3
 **Audio Format:**
 - Input: WebM (Opus, 16kHz, mono)
 - Output: WAV (PCM 16-bit, 16kHz, mono)
+
+### **REST API Endpoints**
+
+#### **GET `/api/sessions`**
+Get all sessions for history sidebar.
+
+**Response:**
+```json
+{
+  "sessions": [
+    {
+      "session_id": "session_abc123",
+      "title": "I'm feeling stressed today...",
+      "turn_count": 7,
+      "created_at": "2026-02-05T10:30:00",
+      "last_updated": "2026-02-05T10:45:00"
+    }
+  ]
+}
+```
+
+#### **POST `/api/sessions/new`**
+Create a new session.
+
+**Response:**
+```json
+{
+  "session_id": "session_xyz789"
+}
+```
+
+#### **DELETE `/api/sessions/{session_id}`**
+Delete a session.
+
+**Response:**
+```json
+{
+  "success": true,
+  "message": "Session session_abc123 deleted"
+}
+```
 
 ---
 

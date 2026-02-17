@@ -40,6 +40,116 @@ TARGET_LABELS = [
 
 
 # ===============================
+# ACOUSTIC FEATURE EXTRACTION
+# ===============================
+
+def extract_acoustic_features(audio_path: str, transcript: str) -> dict:
+    """
+    Extract dynamic acoustic features from audio.
+    
+    Features:
+    - speech_rate: Words per second
+    - pause_duration: Average pause length (silence > 0.3s)
+    - jitter: Voice pitch instability (std of pitch)
+    
+    Args:
+        audio_path: Path to WAV file
+        transcript: Transcribed text
+        
+    Returns:
+        dict with speech_rate, pause_duration, jitter
+    """
+    import numpy as np
+    import librosa
+    
+    # Load audio
+    audio, sr = librosa.load(audio_path, sr=16000, mono=True)
+    duration = len(audio) / sr
+    
+    # ========== 1. SPEECH RATE ==========
+    words = transcript.strip().split()
+    word_count = len(words)
+    
+    if duration > 0 and word_count > 0:
+        speech_rate = word_count / duration
+    else:
+        speech_rate = 3.6  # Default fallback
+    
+    # ========== 2. PAUSE DURATION ==========
+    # Detect silence using RMS energy threshold
+    frame_length = 2048
+    hop_length = 512
+    
+    # Compute RMS energy
+    rms = librosa.feature.rms(
+        y=audio,
+        frame_length=frame_length,
+        hop_length=hop_length
+    )[0]
+    
+    # Threshold for silence (adaptive)
+    silence_threshold = np.percentile(rms, 20)  # Bottom 20% is silence
+    
+    # Find silent frames
+    is_silent = rms < silence_threshold
+    
+    # Compute pause durations (contiguous silent frames)
+    pauses = []
+    current_pause_frames = 0
+    
+    for silent in is_silent:
+        if silent:
+            current_pause_frames += 1
+        else:
+            if current_pause_frames > 0:
+                # Convert frames to seconds
+                pause_duration_sec = (current_pause_frames * hop_length) / sr
+                # Only count pauses > 0.3s
+                if pause_duration_sec > 0.3:
+                    pauses.append(pause_duration_sec)
+                current_pause_frames = 0
+    
+    # Average pause duration
+    if len(pauses) > 0:
+        avg_pause_duration = np.mean(pauses)
+    else:
+        avg_pause_duration = 0.0
+    
+    # ========== 3. JITTER (Pitch Instability) ==========
+    # Extract pitch using YIN algorithm
+    f0 = librosa.yin(
+        audio,
+        fmin=librosa.note_to_hz('C2'),  # ~65 Hz
+        fmax=librosa.note_to_hz('C7'),  # ~2093 Hz
+        sr=sr
+    )
+    
+    # Remove unvoiced frames (f0 == fmin means unvoiced)
+    voiced_f0 = f0[f0 > librosa.note_to_hz('C2')]
+    
+    if len(voiced_f0) > 1:
+        # Jitter = normalized std of pitch
+        mean_pitch = np.mean(voiced_f0)
+        if mean_pitch > 0:
+            jitter = np.std(voiced_f0) / mean_pitch
+        else:
+            jitter = 0.1
+    else:
+        jitter = 0.1  # Default fallback
+    
+    # Normalize jitter to [0, 1] range (typical jitter is 0.01-0.15)
+    jitter = np.clip(jitter, 0.0, 0.3) / 0.3
+    
+    return {
+        "speech_rate": round(speech_rate, 2),
+        "pause_duration": round(avg_pause_duration, 3),
+        "jitter": round(jitter, 3),
+        "audio_duration": round(duration, 2),
+        "word_count": word_count
+    }
+
+
+# ===============================
 # ASR (OpenAI Whisper) + TEXT EMOTION
 # ===============================
 

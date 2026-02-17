@@ -20,15 +20,22 @@ def psychological_llm_response(
     user_text: str,
     adaptive_state: Dict,
     conversation_context: Dict,
+    memory_context: Optional[str] = None,
 ) -> str:
     """
-    Generates a psychologically-aware response with conversation continuity.
+    Generates a psychologically-aware response with conversation continuity and long-term memory.
     
     Args:
         user_text: Current user input
         adaptive_state: Trend-based emotional state
         conversation_context: Minimal context (summary + recent turns)
+        memory_context: Optional long-term memory block (episodic + semantic)
     """
+    
+    # Build memory section (if provided)
+    memory_section = ""
+    if memory_context and memory_context.strip():
+        memory_section = f"\n{memory_context}\n"
     
     # Build minimal, constant-size prompt
     system_prompt = f"""You are a psychologically-aware conversational assistant.
@@ -45,8 +52,9 @@ Your role:
 - Be calm if user shows sustained stress
 - Be clear if user shows confusion trends
 - Be engaging if user shows positive trajectory
+- Use long-term memory to personalize responses when relevant
 
-Current conversation context:
+{memory_section}Current conversation context:
 Topic: {conversation_context.get('dialogue_state', {}).get('primary_topic', 'general')}
 Turn count: {conversation_context.get('turn_count', 0)}
 
@@ -75,6 +83,29 @@ Respond naturally to continue the conversation."""
         max_tokens=150,  # Limit response length for lower latency
     )
 
+    return response.choices[0].message.content.strip()
+
+
+def extract_semantic_facts(prompt: str) -> str:
+    """
+    Lightweight LLM call for semantic memory extraction.
+    Used by memory orchestrator to extract user facts/preferences.
+    """
+    client = _get_openai_client()
+    
+    response = client.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[
+            {
+                "role": "system",
+                "content": "You extract stable user facts and preferences from conversations. Return short declarative statements only, one per line."
+            },
+            {"role": "user", "content": prompt}
+        ],
+        temperature=0.3,  # Lower temperature for factual extraction
+        max_tokens=150
+    )
+    
     return response.choices[0].message.content.strip()
 
 
