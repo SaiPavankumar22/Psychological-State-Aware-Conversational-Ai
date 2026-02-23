@@ -40,7 +40,10 @@ def psychological_llm_response(
     # Build minimal, constant-size prompt
     system_prompt = f"""You are a psychologically-aware conversational assistant.
 
-CRITICAL: You MUST respond ONLY in English. Do NOT use any other language under any circumstances.
+CRITICAL CONSTRAINTS:
+- You MUST respond ONLY in English. Do NOT use any other language under any circumstances.
+- Do NOT use markdown formatting. No asterisks (*), hashes (#), underscores (_), backticks (`), or brackets.
+- Write in plain natural conversation, as if speaking aloud. The user will hear your response as speech.
 
 You are NOT a therapist. You do NOT diagnose. You do NOT give medical advice.
 
@@ -69,7 +72,7 @@ User's emotional state (trend-based, {adaptive_state.get('mode', 'instant')} mod
 
 {_format_trends(adaptive_state.get('trends', {}))}
 
-Respond naturally to continue the conversation."""
+Respond naturally to continue the conversation. Remember: plain text only, no formatting symbols."""
 
     client = _get_openai_client()
 

@@ -15,6 +15,7 @@ from datetime import datetime
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
 from fastapi.responses import HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
+from research_eval_collector import EvalCollector
 
 # =====================================================
 # LOGGING SETUP
@@ -83,6 +84,7 @@ image = (
     .add_local_file("tts_azure.py", remote_path="/root/tts_azure.py")
     .add_local_file("llm_client.py", remote_path="/root/llm_client.py")
     .add_local_file("services.py", remote_path="/root/services.py")
+    .add_local_file("research_eval_collector.py", remote_path="/root/research_eval_collector.py")
 )
 
 # =====================================================
@@ -227,6 +229,63 @@ def webm_to_wav(webm_bytes, output_path: str) -> str:
     return output_path
 
 # =====================================================
+# MARKDOWN CLEANING (for TTS)
+# =====================================================
+
+def _clean_markdown_for_tts(text: str) -> str:
+    """
+    Remove markdown formatting from text before sending to TTS.
+    
+    Azure TTS reads markdown symbols literally (e.g., * as 'Asterisk'),
+    so we clean them to ensure natural speech output.
+    
+    Removes:
+    - Bold markers: **text** -> text
+    - Italic markers: *text*, _text_ -> text
+    - Headers: # Text -> Text
+    - Code blocks: `code` -> code
+    - Links: [text](url) -> text
+    - Lists: - item -> item
+    - Emphasis: ***text*** -> text
+    """
+    import re
+    
+    if not text:
+        return text
+    
+    # Remove bold: **text** or __text__ -> text
+    text = re.sub(r'\*\*(.+?)\*\*', r'\1', text)
+    text = re.sub(r'__(.+?)__', r'\1', text)
+    
+    # Remove italic: *text* or _text_ -> text
+    text = re.sub(r'\*(.+?)\*', r'\1', text)
+    text = re.sub(r'_(.+?)_', r'\1', text)
+    
+    # Remove headers: # Text -> Text
+    text = re.sub(r'^#+\s+', '', text, flags=re.MULTILINE)
+    
+    # Remove inline code: `code` -> code
+    text = re.sub(r'`([^`]+)`', r'\1', text)
+    
+    # Remove code blocks (triple backticks)
+    text = re.sub(r'```[\s\S]*?```', '', text)
+    
+    # Remove links: [text](url) -> text
+    text = re.sub(r'\[([^\]]+)\]\([^\)]+\)', r'\1', text)
+    
+    # Remove list markers: - item -> item
+    text = re.sub(r'^[\s]*[-*+]\s+', ' ', text, flags=re.MULTILINE)
+    
+    # Remove emphasis: ***text*** -> text
+    text = re.sub(r'\*{3,}(.+?)\*{3,}', r'\1', text)
+    
+    # Clean up extra spaces
+    text = re.sub(r'\s+', ' ', text)
+    text = text.strip()
+    
+    return text
+
+# =====================================================
 # MODAL CLASS - GPU BACKEND
 # =====================================================
 
@@ -266,13 +325,21 @@ class ConversationalAI:
         self, 
         audio_data: str,
         session_id: str,
-        voice_name: str = "en-US-DragonV2.1Neural"
+        voice_name: str = "en-IN-KavyaNeural"
     ) -> dict:
         """Process a conversation turn with full state management"""
         import asyncio
         from llm_client import psychological_llm_response
         from tts_azure import synthesize_azure_tts
         from services import SER_LABELS
+        
+        # ✅ Initialize all potentially-used variables to avoid UnboundLocalError
+        should_retrieve = False
+        retrieval_reason = "not_triggered"
+        emotional_shift_detected = False
+        shift_dimension = None
+        topic_confidence = 0.0
+        memory_context = ""
         
         # ✅ Load session state (from persistent storage)
         session = get_session(session_id)
@@ -367,7 +434,6 @@ class ConversationalAI:
             )
             
             # === LONG-TERM MEMORY RETRIEVAL ===
-            memory_context = ""
             user_id = session_id  # Use session_id as user_id
             
             if should_retrieve:
@@ -410,10 +476,14 @@ class ConversationalAI:
                 logger.warning("⚠️ Invalid LLM response, using fallback")
                 llm_reply = "I'm having trouble responding right now. Could you try that again?"
             
-            # Truncate if too long (for TTS)
-            if len(llm_reply) > 500:
-                logger.warning("⚠️ LLM response too long, truncating")
-                llm_reply = llm_reply[:497] + "..."
+            # === CLEAN MARKDOWN FROM LLM RESPONSE (for TTS) ===
+            # Remove markdown symbols: *, #, _, -, `, etc. to prevent TTS from reading them
+            llm_reply_for_tts = _clean_markdown_for_tts(llm_reply)
+            
+            # Note: Do NOT truncate - Azure TTS can handle longer responses!
+            # Just log a warning if response is unusually long
+            if len(llm_reply) > 800:
+                logger.warning(f"ℹ️ Long LLM response ({len(llm_reply)} chars) - may take longer to synthesize")
             
             logger.info(f"💬 Response: {llm_reply[:100]}...")
             
@@ -421,6 +491,26 @@ class ConversationalAI:
             tts_params = tts_controller.compute(adaptive_state)
             logger.debug(f"🎵 TTS: style={tts_params['style']}, degree={tts_params['styledegree']}, "
                   f"rate={tts_params['rate']}, pitch={tts_params['pitch']}")
+            EvalCollector.record_turn(
+    session_id=session_id,
+    turn_number=current_turn,
+    transcript=transcript,
+    instant_state=instant_psychological_state,
+    adaptive_state=adaptive_state,
+    interaction_mode=adaptive_state.get("mode", "neutral"),
+    tts_params=tts_params,
+    topic=conv_state.dialogue_state.primary_topic,
+    topic_confidence=topic_confidence,
+    top_text_emotions=dict(sorted(
+        asr_result.get('text_emotion', {}).items(),
+        key=lambda x: x[1], reverse=True
+    )[:5]),
+    ser_dict=ser_dict,
+    memory_retrieved=should_retrieve,
+    emotional_shift_detected=emotional_shift_detected,
+    shift_dimension=shift_dimension,
+    acoustic_features=acoustic_features,
+)
             
             # === GENERATE TTS ===
             tts_audio_bytes = None
@@ -428,7 +518,7 @@ class ConversationalAI:
                 logger.info("🔊 Synthesizing audio...")
                 tts_audio_path = await asyncio.to_thread(
                     synthesize_azure_tts,
-                    llm_reply,
+                    llm_reply_for_tts,  # Use cleaned version without markdown
                     tts_params,
                     "/tmp",
                     voice_name
@@ -2216,6 +2306,18 @@ class ConversationalAI:
             """Basic health check - Modal's health prober"""
             logger.debug("📊 Health check")
             return {"status": "healthy"}
+        @web_app.get("/api/eval/summary")
+        async def get_eval_summary():
+            """Get live research evaluation metrics"""
+            return EvalCollector.compute_metrics()
+
+        @web_app.post("/api/eval/save")
+        async def save_eval_report():
+            """Save evaluation report to JSON and CSV"""
+            EvalCollector.save_report("/tmp/eval_results.json")
+            EvalCollector.save_csv("/tmp/eval_turns.csv")
+            EvalCollector.print_summary()
+            return {"status": "saved", "turns": len(EvalCollector._turns)}
         
         @web_app.get("/readiness")
         async def readiness_check():

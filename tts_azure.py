@@ -15,18 +15,17 @@ import azure.cognitiveservices.speech as speechsdk
 
 AZURE_TTS_KEY = os.getenv("AZURE_TTS_KEY")
 AZURE_REGION = os.getenv("AZURE_TTS_REGION", "centralindia")
-DEFAULT_VOICE_NAME = "en-US-DragonV2.1Neural"
+DEFAULT_VOICE_NAME = "en-IN-KavyaNeural"
 
 # Available voices for frontend selection
 AVAILABLE_VOICES = [
-    "en-US-DragonV2.1Neural",
+    "en-IN-KavyaNeural",
+    "en-IN-AnanyaNeural",
+    "en-IN-AashiNeural",
     "en-US-AvaMultilingualNeural",
     "en-US-AndrewMultilingualNeural",
     "en-US-EmmaMultilingualNeural",
     "en-US-BrianMultilingualNeural",
-    "en-IN-KavyaNeural",
-    "en-IN-AnanyaNeural",
-    "en-IN-AashiNeural",
 ]
 
 AUDIO_FORMAT = speechsdk.SpeechSynthesisOutputFormat.Riff16Khz16BitMonoPcm
