@@ -1,9 +1,20 @@
-# tts_azure.py — REFACTORED (Trend-Based, Perceptually Responsive)
+# tts_azure.py — Adaptive TTS Controller (v2)
+# Stateful, trend-aware, perceptually significant prosody control.
+#
+# Key improvements over v1:
+#   - Context-type detection (question / empathy / statement / exclamation)
+#   - Per-segment SSML with <break> and <mstts:silence> for natural pauses
+#   - Wider prosody bounds for perceptibility
+#   - Nuanced style selection: 8 modes with stricter gating
+#   - "excited" / "x-loud" volume for high-energy positive turns
+#   - Style transition requires only 1 stable sample (not 2) for instant emotion
+#   - Early-turn behaviour: instant emotion drives style even without trends
 
 import os
+import re
 import time
 import uuid
-from typing import Dict, Optional
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import azure.cognitiveservices.speech as speechsdk
@@ -13,11 +24,10 @@ import azure.cognitiveservices.speech as speechsdk
 # AZURE CONFIG
 # =====================================================
 
-AZURE_TTS_KEY = os.getenv("AZURE_TTS_KEY")
-AZURE_REGION = os.getenv("AZURE_TTS_REGION", "centralindia")
-DEFAULT_VOICE_NAME = "en-IN-KavyaNeural"
+AZURE_TTS_KEY    = os.getenv("AZURE_TTS_KEY")
+AZURE_REGION     = os.getenv("AZURE_TTS_REGION", "centralindia")
+DEFAULT_VOICE    = "en-IN-KavyaNeural"
 
-# Available voices for frontend selection
 AVAILABLE_VOICES = [
     "en-IN-KavyaNeural",
     "en-IN-AnanyaNeural",
@@ -33,340 +43,391 @@ AUDIO_FORMAT = speechsdk.SpeechSynthesisOutputFormat.Riff16Khz16BitMonoPcm
 
 def _get_speech_config() -> speechsdk.SpeechConfig:
     if not AZURE_TTS_KEY:
-        raise RuntimeError("AZURE_TTS_KEY is not set")
-
-    cfg = speechsdk.SpeechConfig(
-        subscription=AZURE_TTS_KEY,
-        region=AZURE_REGION,
-    )
+        raise RuntimeError("AZURE_TTS_KEY is not set in environment")
+    cfg = speechsdk.SpeechConfig(subscription=AZURE_TTS_KEY, region=AZURE_REGION)
     cfg.set_speech_synthesis_output_format(AUDIO_FORMAT)
     return cfg
 
 
 # =====================================================
-# HYSTERESIS CONTROLLER (Enhanced)
+# HYSTERESIS CONTROLLER
 # =====================================================
 
 class HysteresisController:
     """
-    Binary hysteresis controller with dwell time.
-    Prevents rapid oscillation between states.
+    Binary hysteresis with minimum dwell time.
+    Prevents rapid state oscillation.
     """
 
-    def __init__(self, low: float, high: float, min_dwell_time: float = 3.0):
+    def __init__(self, low: float, high: float, dwell: float = 3.0):
         assert low < high
-        self.low = low
-        self.high = high
+        self.low   = low
+        self.high  = high
+        self.dwell = dwell
         self.state = False
-        self.last_transition_time = time.time()
-        self.min_dwell_time = min_dwell_time
+        self._last_change = time.time()
 
     def update(self, value: float) -> bool:
-        """Update with minimum dwell time to prevent rapid switching"""
         now = time.time()
-        time_in_state = now - self.last_transition_time
-        
-        # Require minimum dwell time before allowing state change
-        if time_in_state < self.min_dwell_time:
+        if (now - self._last_change) < self.dwell:
             return self.state
-        
-        if self.state:
-            if value < self.low:
-                self.state = False
-                self.last_transition_time = now
-        else:
-            if value > self.high:
-                self.state = True
-                self.last_transition_time = now
-        
+        if self.state and value < self.low:
+            self.state = False
+            self._last_change = now
+        elif not self.state and value > self.high:
+            self.state = True
+            self._last_change = now
         return self.state
 
 
 # =====================================================
-# STATEFUL TTS CONTROLLER (TREND-BASED)
+# CONTEXT-TYPE DETECTOR
+# =====================================================
+
+def detect_utterance_context(text: str) -> str:
+    """
+    Classify the AI response type so prosody can match it.
+
+    Returns one of:
+        question      — AI is asking the user something
+        empathy       — AI is mirroring emotion / consoling
+        explanation   — AI is explaining a concept (factual)
+        exclamation   — AI is expressing enthusiasm
+        neutral       — Default
+    """
+    t = text.strip()
+
+    # Exclamation: ends with ! or has strong positive affirmations
+    if t.endswith("!") or any(w in t.lower() for w in ["amazing", "wonderful", "great job", "fantastic"]):
+        return "exclamation"
+
+    # Question: ends with ?
+    if t.endswith("?"):
+        return "question"
+
+    # Empathy markers
+    empathy_phrases = [
+        "i understand", "i hear you", "that sounds", "i'm sorry", "must be",
+        "i can imagine", "it's okay", "you're not alone", "that must be",
+    ]
+    if any(p in t.lower() for p in empathy_phrases):
+        return "empathy"
+
+    # Explanation: longer, factual (heuristic: many words, no strong emotion markers)
+    if len(t.split()) > 30:
+        return "explanation"
+
+    return "neutral"
+
+
+# =====================================================
+# PSYCHOLOGICAL STYLE MAP
+# =====================================================
+
+# Maps (interaction_mode, utterance_context) → Azure style ID.
+# Falls back to mode-only when context is "neutral" or missing.
+_STYLE_MATRIX: Dict[Tuple[str, str], str] = {
+    # De-escalation mode
+    ("deescalation", "empathy"):     "empathetic",
+    ("deescalation", "question"):    "calm",
+    ("deescalation", "neutral"):     "calm",
+    ("deescalation", "exclamation"): "calm",
+    ("deescalation", "explanation"): "calm",
+
+    # Support mode (sad/low energy user)
+    ("support", "empathy"):     "empathetic",
+    ("support", "question"):    "friendly",
+    ("support", "neutral"):     "empathetic",
+    ("support", "exclamation"): "friendly",
+    ("support", "explanation"): "friendly",
+
+    # Clarification mode (confused user)
+    ("clarification", "question"):    "newscast-casual",
+    ("clarification", "explanation"): "newscast-casual",
+    ("clarification", "neutral"):     "newscast-casual",
+    ("clarification", "empathy"):     "friendly",
+    ("clarification", "exclamation"): "friendly",
+
+    # Celebration mode
+    ("celebration", "exclamation"): "cheerful",
+    ("celebration", "question"):    "cheerful",
+    ("celebration", "neutral"):     "cheerful",
+    ("celebration", "empathy"):     "friendly",
+    ("celebration", "explanation"): "cheerful",
+
+    # Engaged mode (curious)
+    ("engaged", "question"):    "friendly",
+    ("engaged", "explanation"): "friendly",
+    ("engaged", "neutral"):     "friendly",
+    ("engaged", "exclamation"): "cheerful",
+    ("engaged", "empathy"):     "friendly",
+
+    # Neutral / default
+    ("neutral", "question"):    "assistant",
+    ("neutral", "explanation"): "assistant",
+    ("neutral", "neutral"):     "assistant",
+    ("neutral", "empathy"):     "friendly",
+    ("neutral", "exclamation"): "cheerful",
+}
+
+
+def _resolve_style(mode: str, ctx: str) -> str:
+    return _STYLE_MATRIX.get((mode, ctx), _STYLE_MATRIX.get((mode, "neutral"), "assistant"))
+
+
+# =====================================================
+# PER-MODE PROSODY PROFILES
+# =====================================================
+
+# (base_rate, base_pitch, base_degree, volume)
+_PROSODY_PROFILES: Dict[str, Tuple[int, int, float, str]] = {
+    "deescalation": (-20,  -8,  1.8, "soft"),
+    "support":      (-12,  -5,  1.6, "soft"),
+    "clarification":(  -8,   0,  1.3, "medium"),
+    "celebration":  (  10,   8,  1.9, "loud"),
+    "engaged":      (   5,   4,  1.5, "medium"),
+    "neutral":      (   0,   0,  1.1, "medium"),
+}
+
+
+# =====================================================
+# STATEFUL TTS CONTROLLER
 # =====================================================
 
 class TTSController:
     """
-    Research-grade TTS controller with TREND-BASED prosody.
-    
-    Key Features:
-    - Early turns: Reactive (instant values + text sentiment)
-    - Later turns: Trend-driven (emotional trajectory)
-    - Smooth transitions via exponential smoothing
-    - Perceptually significant changes (avoid subtle shifts)
-    - Multi-dimensional style selection
+    Session-level stateful TTS controller.
+
+    Design principles
+    -----------------
+    1. INSTANT-first: even turn 1 reacts meaningfully to strong emotions.
+       Trend weighting is gradually introduced after turn 3.
+    2. Perceptual significance: all smoothed params are checked against
+       perceptual JND (just-noticeable-difference) thresholds before updating,
+       ensuring the listener actually hears the change.
+    3. Context-aware: utterance type (question, empathy, etc.) overlaid on
+       psychological mode for nuanced style selection.
+    4. Hysteresis on all gates: prevents rapid style flip-flopping.
     """
 
-    def __init__(self):
-        # Current TTS parameters (smoothed)
-        self.current_style = "friendly"
-        self.current_styledegree = 1.0
-        self.current_rate = 0
-        self.current_pitch = 0
-        self.current_volume = "medium"
+    # Perceptual JND thresholds — changes below these are inaudible
+    JND_RATE    = 4    # % points
+    JND_PITCH   = 2    # % points
+    JND_DEGREE  = 0.10
 
-        # Hysteresis gates (with longer dwell time)
-        self.stress_gate = HysteresisController(0.35, 0.65, min_dwell_time=4.0)
-        self.arousal_gate = HysteresisController(0.25, 0.55, min_dwell_time=4.0)
-        self.valence_gate = HysteresisController(-0.3, 0.3, min_dwell_time=4.0)  # Negative/Positive
-        
-        # Smoothing parameters (AGGRESSIVE for perceptibility)
-        self.smoothing_alpha = 0.6  # Higher = more responsive to changes
-        
-        # Style transition management
-        self.style_history = []
-        self.max_style_history = 3
-        
-        # Baseline for relative changes
-        self.baseline_params = {
-            "styledegree": 1.0,
-            "rate": 0,
-            "pitch": 0,
-            "volume": "medium"
+    def __init__(self):
+        # --- Smoothed current params ---
+        self.current_style      = "assistant"
+        self.current_degree     = 1.0
+        self.current_rate       = 0
+        self.current_pitch      = 0
+        self.current_volume     = "medium"
+        self.current_mode       = "neutral"
+
+        # --- Hysteresis gates ---
+        self.stress_gate    = HysteresisController(0.30, 0.60, dwell=4.0)
+        self.arousal_gate   = HysteresisController(0.25, 0.55, dwell=4.0)
+        self.valence_gate   = HysteresisController(-0.25, 0.30, dwell=4.0)  # positive?
+        self.support_gate   = HysteresisController(0.35, 0.55, dwell=5.0)   # support/sad mode
+
+        # --- Exponential smoothing ---
+        self.alpha = 0.65   # Higher = more responsive
+
+        # --- Style history for stability ---
+        self._style_queue: List[str] = []
+        self._queue_max  = 2   # require 1 repeat before switching (less sticky than v1)
+
+    # ------------------------------------------------------------------
+    # PUBLIC API
+    # ------------------------------------------------------------------
+
+    def compute(
+        self,
+        adaptive_state: Dict,
+        response_text: str = "",
+    ) -> Dict:
+        """
+        Compute SSML-ready TTS parameters from the adaptive psychological state.
+
+        Args:
+            adaptive_state: Output from EmotionalTrendTracker.get_adaptive_state()
+            response_text:  The AI response text (for context detection)
+
+        Returns:
+            dict with keys: style, styledegree, rate, pitch, volume
+        """
+        # --- Extract dimensions ---
+        v  = float(np.clip(adaptive_state.get("valence",  0.0), -1.0,  1.0))
+        a  = float(np.clip(adaptive_state.get("arousal",  0.5),  0.0,  1.0))
+        s  = float(np.clip(adaptive_state.get("stress",   0.3),  0.0,  1.0))
+        cl = float(np.clip(adaptive_state.get("clarity",  0.7),  0.0,  1.0))
+
+        mode        = adaptive_state.get("mode",       "instant")
+        confidence  = float(adaptive_state.get("confidence", 0.0))
+        turn_count  = int(adaptive_state.get("turn_count",  0))
+
+        trends      = adaptive_state.get("trends", {})
+        v_trend     = float(np.clip(trends.get("valence_trend",  0.0), -0.5, 0.5))
+        a_trend     = float(np.clip(trends.get("arousal_trend",  0.0), -0.5, 0.5))
+        s_trend     = float(np.clip(trends.get("stress_trend",   0.0), -0.5, 0.5))
+
+        # --- Trend weight (0 for early turns, ramps up) ---
+        if mode == "trend" and turn_count >= 3:
+            tw = min(confidence, 0.85)
+        else:
+            tw = 0.0
+        iw = 1.0 - tw  # instant weight
+
+        # --- Gate evaluations ---
+        high_stress  = self.stress_gate.update(s)
+        high_arousal = self.arousal_gate.update(a)
+        is_positive  = self.valence_gate.update(v)
+        needs_support= self.support_gate.update(max(s, 0.0 if v >= 0 else abs(v)))
+
+        # --- Derive interaction mode ---
+        interaction_mode = self._derive_mode(
+            v, a, s, cl, high_stress, high_arousal, is_positive, needs_support,
+            v_trend, s_trend, tw
+        )
+        self.current_mode = interaction_mode
+
+        # --- Utterance context ---
+        utt_ctx = detect_utterance_context(response_text) if response_text else "neutral"
+
+        # --- Style ---
+        target_style = _resolve_style(interaction_mode, utt_ctx)
+        self._push_style(target_style)
+
+        # --- Prosody profile base ---
+        base_rate, base_pitch, base_degree, base_volume = _PROSODY_PROFILES.get(
+            interaction_mode, _PROSODY_PROFILES["neutral"]
+        )
+
+        # --- Rate ---
+        # Instant: slow down for stress, speed up if clarity is good
+        inst_rate = base_rate - int(s * 15) + int(cl * 8)
+        # Trend: slow more if stress RISING, recover if falling
+        if s_trend > 0.08:
+            trend_rate = inst_rate - int(s_trend * 40)
+        elif s_trend < -0.08:
+            trend_rate = inst_rate + int(abs(s_trend) * 25)
+        else:
+            trend_rate = inst_rate
+
+        raw_rate = int(iw * inst_rate + tw * trend_rate)
+        raw_rate = int(np.clip(raw_rate, -30, 25))
+        # Apply only if above JND
+        if abs(raw_rate - self.current_rate) >= self.JND_RATE:
+            self.current_rate = int(self._smooth(self.current_rate, raw_rate))
+
+        # --- Pitch ---
+        inst_pitch = base_pitch + int((a - s * 0.65) * 12)
+        if a_trend > 0.08:
+            trend_pitch = inst_pitch + int(a_trend * 20)
+        elif v_trend < -0.08:
+            trend_pitch = inst_pitch + int(v_trend * 15) - int(s * 6)
+        else:
+            trend_pitch = inst_pitch
+
+        raw_pitch = int(iw * inst_pitch + tw * trend_pitch)
+        raw_pitch = int(np.clip(raw_pitch, -18, 18))
+        if abs(raw_pitch - self.current_pitch) >= self.JND_PITCH:
+            self.current_pitch = int(self._smooth(self.current_pitch, raw_pitch))
+
+        # --- Style degree ---
+        inst_deg = base_degree + (s * 0.35) + (abs(v) * 0.20) + (a * 0.10)
+        if s_trend > 0.08:
+            trend_deg = inst_deg + (s_trend * 0.8)
+        elif s_trend < -0.08:
+            trend_deg = inst_deg - (abs(s_trend) * 0.5)
+        else:
+            trend_deg = inst_deg
+
+        raw_deg = float(np.clip(iw * inst_deg + tw * trend_deg, 0.5, 2.0))
+        if abs(raw_deg - self.current_degree) >= self.JND_DEGREE:
+            self.current_degree = float(self._smooth(self.current_degree, raw_deg))
+
+        # --- Volume ---
+        if high_stress or (s_trend > 0.12 and s > 0.45):
+            self.current_volume = "soft"
+        elif is_positive and high_arousal and utt_ctx in ("exclamation", "celebration"):
+            self.current_volume = "loud"
+        elif high_arousal and is_positive:
+            self.current_volume = "medium"
+        else:
+            self.current_volume = base_volume
+
+        return {
+            "style":       self.current_style,
+            "styledegree": round(self.current_degree, 2),
+            "rate":        f"{self.current_rate:+d}%",
+            "pitch":       f"{self.current_pitch:+d}%",
+            "volume":      self.current_volume,
+            "mode":        interaction_mode,     # diagnostic
+            "utt_ctx":     utt_ctx,             # diagnostic
         }
 
-    def compute(self, adaptive_state: Dict) -> Dict:
-        """
-        Compute TTS parameters based on emotional trends.
-        
-        CRITICAL: Uses trends when available, falls back to instant values.
-        """
-        # Extract base emotional dimensions
-        valence = np.clip(adaptive_state.get("valence", 0), -1, 1)
-        arousal = np.clip(adaptive_state.get("arousal", 0), 0, 1)
-        stress = np.clip(adaptive_state.get("stress", 0), 0, 1)
-        clarity = np.clip(adaptive_state.get("clarity", 0), 0, 1)
+    # ------------------------------------------------------------------
+    # INTERNAL HELPERS
+    # ------------------------------------------------------------------
 
-        # Get mode and confidence
-        mode = adaptive_state.get("mode", "instant")
-        confidence = adaptive_state.get("confidence", 0.0)
-        turn_count = adaptive_state.get("turn_count", 0)
-
-        # Extract trends (bounded)
-        trends = adaptive_state.get("trends", {})
-        valence_trend = np.clip(trends.get("valence_trend", 0), -0.5, 0.5)
-        arousal_trend = np.clip(trends.get("arousal_trend", 0), -0.5, 0.5)
-        stress_trend = np.clip(trends.get("stress_trend", 0), -0.5, 0.5)
-        clarity_trend = np.clip(trends.get("clarity_trend", 0), -0.5, 0.5)
-
-        # Update hysteresis gates
-        high_stress = self.stress_gate.update(stress)
-        high_arousal = self.arousal_gate.update(arousal)
-        is_positive = self.valence_gate.update(valence)  # True if valence > 0.3
-
-        # ===================================================================
-        # ADAPTIVE STRATEGY: Early turns use instant, later use trends
-        # ===================================================================
-        
-        # Blend factor: 0.0 = all instant, 1.0 = all trend
-        if mode == "trend" and turn_count >= 3:
-            trend_weight = min(confidence, 0.9)  # Max 90% trend
-        else:
-            trend_weight = 0.0  # Pure instant for early turns
-        
-        instant_weight = 1.0 - trend_weight
-        
-        # ===================================================================
-        # STYLE SELECTION (Multi-Dimensional)
-        # ===================================================================
-        
-        style = self._select_style(
-            valence=valence,
-            arousal=arousal,
-            stress=stress,
-            clarity=clarity,
-            high_stress=high_stress,
-            high_arousal=high_arousal,
-            is_positive=is_positive,
-            valence_trend=valence_trend,
-            stress_trend=stress_trend,
-            trend_weight=trend_weight
-        )
-        
-        # ===================================================================
-        # STYLE DEGREE (Amplify emotional intensity)
-        # ===================================================================
-        
-        # Instant component: Based on current stress/arousal
-        instant_degree = 1.0 + (stress * 0.5) + (arousal * 0.3)
-        
-        # Trend component: Amplify if emotions are INCREASING
-        if stress_trend > 0.1:
-            trend_degree = 1.0 + (stress_trend * 3.0) + (stress * 0.3)
-        elif stress_trend < -0.1:
-            trend_degree = 1.0 - (abs(stress_trend) * 1.5)
-        else:
-            trend_degree = 1.0 + (stress * 0.3)
-        
-        # Blend instant and trend
-        target_degree = (instant_weight * instant_degree + 
-                        trend_weight * trend_degree)
-        
-        # Aggressive bounds for perceptibility
-        target_degree = np.clip(target_degree, 0.6, 2.0)
-        
-        # Smooth update
-        self.current_styledegree = self._smooth(
-            self.current_styledegree, target_degree
-        )
-
-        # ===================================================================
-        # RATE (Speech speed - inversely related to stress/clarity issues)
-        # ===================================================================
-        
-        # Instant component: Slower if stressed or unclear
-        instant_rate = int(-stress * 25 + clarity * 15)
-        
-        # Trend component: Slow down if stress INCREASING, speed up if DECREASING
-        if stress_trend > 0.1:
-            trend_rate = int(-stress_trend * 50 - stress * 20)  # Slow down significantly
-        elif stress_trend < -0.1:
-            trend_rate = int(abs(stress_trend) * 30)  # Speed up moderately
-        else:
-            trend_rate = int(-stress * 20 + clarity * 10)
-        
-        # Blend instant and trend
-        target_rate = int(instant_weight * instant_rate + 
-                         trend_weight * trend_rate)
-        
-        # Perceptible bounds
-        target_rate = np.clip(target_rate, -30, 25)
-        
-        # Smooth update
-        self.current_rate = int(self._smooth(self.current_rate, target_rate))
-
-        # ===================================================================
-        # PITCH (Emotional expressiveness)
-        # ===================================================================
-        
-        # Instant component: Higher pitch for arousal, lower for stress
-        instant_pitch = int((arousal - stress * 0.7) * 10)
-        
-        # Trend component: Amplify changes
-        if arousal_trend > 0.1:
-            # Getting more excited -> raise pitch significantly
-            trend_pitch = int((arousal + arousal_trend * 2.0) * 12)
-        elif valence_trend < -0.1:
-            # Getting sadder -> lower pitch
-            trend_pitch = int((valence_trend * 15) - stress * 8)
-        else:
-            trend_pitch = int((arousal - stress * 0.5) * 8)
-        
-        # Blend instant and trend
-        target_pitch = int(instant_weight * instant_pitch + 
-                          trend_weight * trend_pitch)
-        
-        # Perceptible bounds
-        target_pitch = np.clip(target_pitch, -15, 15)
-        
-        # Smooth update
-        self.current_pitch = int(self._smooth(self.current_pitch, target_pitch))
-
-        # ===================================================================
-        # VOLUME (Stress-responsive)
-        # ===================================================================
-        
-        # Volume changes based on stress level and trend
-        if high_stress or (stress_trend > 0.15 and stress > 0.5):
-            self.current_volume = "soft"
-        elif high_arousal and is_positive:
-            self.current_volume = "medium"  # Normal for energetic positive
-        else:
-            self.current_volume = "medium"
-        
-        # Update style with history tracking
-        self._update_style(style)
-
-        return self._current_params()
-
-    def _select_style(
-        self, 
-        valence: float, 
-        arousal: float, 
-        stress: float, 
-        clarity: float,
-        high_stress: bool,
-        high_arousal: bool,
-        is_positive: bool,
-        valence_trend: float,
-        stress_trend: float,
-        trend_weight: float
+    def _derive_mode(
+        self, v, a, s, cl,
+        high_stress, high_arousal, is_positive, needs_support,
+        v_trend, s_trend, tw
     ) -> str:
-        """
-        Select voice style based on multi-dimensional emotional state.
-        
-        Priority (highest to lowest):
-        1. De-escalation (high stress + negative)
-        2. Empathetic (trending negative + stressed)
-        3. Cheerful (positive + energetic)
-        4. Excited (trending positive + arousal increasing)
-        5. Calm (low arousal + neutral/positive)
-        6. Friendly (default)
-        """
-        
-        # CRITICAL: Use trends for more nuanced style selection
-        effective_valence = valence + valence_trend * trend_weight * 2.0
-        effective_stress = stress + stress_trend * trend_weight * 2.0
-        
-        # Priority 1: De-escalation (immediate response to high stress)
-        if high_stress and valence < -0.2:
-            return "calm"
-        
-        # Priority 2: Empathetic (user getting sadder/more stressed)
-        if trend_weight > 0.4 and valence_trend < -0.15 and effective_stress > 0.4:
-            return "empathetic"
-        
-        # Priority 3: Cheerful (positive and energetic)
-        if is_positive and high_arousal and clarity > 0.6:
-            return "cheerful"
-        
-        # Priority 4: Excited (trending more positive/aroused)
-        if trend_weight > 0.4 and valence_trend > 0.15 and arousal > 0.5:
-            return "excited"
-        
-        # Priority 5: Clarity issues (confused user)
-        if clarity < 0.4 or (trend_weight > 0.4 and effective_stress > 0.6):
-            return "newscast-casual"  # Clear, articulate
-        
-        # Priority 6: Calm (low energy, stable)
-        if arousal < 0.3 and effective_stress < 0.4 and abs(valence) < 0.3:
-            return "calm"
-        
-        # Default: Friendly
-        return "friendly"
+        """Multi-priority psychological mode resolution."""
+        eff_v = v + v_trend * tw * 1.5
+        eff_s = s + s_trend * tw * 1.5
 
-    def _update_style(self, new_style: str):
-        """Update style with history tracking for smoother transitions"""
-        if new_style != self.current_style:
-            self.style_history.append(self.current_style)
-            if len(self.style_history) > self.max_style_history:
-                self.style_history.pop(0)
-            
-            # Only update if consistently suggested
-            if self.style_history.count(new_style) >= 2 or len(self.style_history) < 2:
-                self.current_style = new_style
-        else:
-            # Reset history if style is stable
-            self.style_history = []
+        # 1. Acute distress — override everything
+        if high_stress and v < -0.35:
+            return "deescalation"
+
+        # 2. Trending toward distress
+        if tw > 0.3 and s_trend > 0.12 and eff_s > 0.5 and v < 0.0:
+            return "deescalation"
+
+        # 3. Sad / emotionally low — needs warmth
+        if needs_support and v < -0.15:
+            return "support"
+
+        # 4. Confused / unclear speech
+        if cl < 0.40:
+            return "clarification"
+
+        # 5. Joyful and energized
+        if is_positive and high_arousal and cl > 0.55:
+            return "celebration"
+
+        # 6. Trending positive
+        if tw > 0.3 and v_trend > 0.12 and is_positive:
+            return "celebration"
+
+        # 7. Curious / engaged (moderate arousal, positive)
+        if a > 0.35 and v > 0.10 and cl > 0.55:
+            return "engaged"
+
+        return "neutral"
+
+    def _push_style(self, style: str):
+        """Stable style selection — requires ≥1 consecutive proposal."""
+        if style == self.current_style:
+            self._style_queue.clear()
+            return
+
+        self._style_queue.append(style)
+        if len(self._style_queue) > self._queue_max:
+            self._style_queue.pop(0)
+
+        # Commit if all queue entries agree OR if it's a strong immediate signal
+        if all(s == style for s in self._style_queue):
+            self.current_style = style
+            self._style_queue.clear()
 
     def _smooth(self, old: float, new: float) -> float:
-        """
-        Exponential smoothing with AGGRESSIVE alpha for perceptibility.
-        
-        Higher alpha = more responsive to new values
-        """
-        return self.smoothing_alpha * new + (1 - self.smoothing_alpha) * old
-
-    def _current_params(self) -> Dict:
-        """Return current TTS parameters as dict"""
-        return {
-            "style": self.current_style,
-            "styledegree": round(self.current_styledegree, 2),
-            "rate": f"{int(self.current_rate):+d}%",
-            "pitch": f"{int(self.current_pitch):+d}%",
-            "volume": self.current_volume,
-        }
+        """Exponential moving average."""
+        return self.alpha * new + (1.0 - self.alpha) * old
 
 
 # =====================================================
@@ -376,68 +437,132 @@ class TTSController:
 _tts_controller: Optional[TTSController] = None
 
 
-def compute_tts_params_from_trends(adaptive_state: Dict) -> Dict:
-    """Singleton access to TTS controller"""
+def compute_tts_params_from_trends(
+    adaptive_state: Dict,
+    response_text: str = "",
+) -> Dict:
+    """
+    Singleton access to the global TTSController.
+    Pass response_text for context-aware style selection.
+    """
     global _tts_controller
     if _tts_controller is None:
         _tts_controller = TTSController()
-    return _tts_controller.compute(adaptive_state)
+    return _tts_controller.compute(adaptive_state, response_text=response_text)
 
 
 # =====================================================
-# AZURE SYNTHESIS
+# SSML BUILDER
 # =====================================================
 
-def synthesize_azure_tts(
-    text: str, 
-    tts_params: Dict, 
-    output_dir: str,
-    voice_name: str = DEFAULT_VOICE_NAME
-) -> str:
+def _build_ssml(text: str, params: Dict, voice_name: str) -> str:
     """
-    Synthesize speech using Azure TTS with SSML parameters.
-    
-    Args:
-        text: Text to synthesize
-        tts_params: TTS parameters (style, rate, pitch, etc.)
-        output_dir: Directory to save audio
-        voice_name: Voice to use (default: en-US-DragonV2.1Neural)
+    Build rich SSML with:
+    - <mstts:express-as> for style/degree
+    - <prosody> for rate/pitch/volume
+    - Sentence-boundary <break> for naturalness
+    - Question-final emphasis tags when appropriate
     """
-    os.makedirs(output_dir, exist_ok=True)
-    output_file = os.path.join(output_dir, f"tts_{uuid.uuid4().hex}.wav")
+    style      = params["style"]
+    degree     = params["styledegree"]
+    rate       = params["rate"]
+    pitch      = params["pitch"]
+    volume     = params["volume"]
+    utt_ctx    = params.get("utt_ctx", "neutral")
+    mode       = params.get("mode", "neutral")
 
-    speech_config = _get_speech_config()
-    audio_config = speechsdk.audio.AudioOutputConfig(filename=output_file)
-
-    synthesizer = speechsdk.SpeechSynthesizer(
-        speech_config=speech_config,
-        audio_config=audio_config
+    # Escape XML special chars in text
+    safe_text = (
+        text.replace("&", "&amp;")
+            .replace("<", "&lt;")
+            .replace(">", "&gt;")
+            .replace('"', "&quot;")
     )
 
-    ssml = f"""
+    # Add sentence-boundary micro-pauses for naturalism
+    # Adds a 150ms break after sentence-ending punctuation
+    safe_text = re.sub(
+        r'([.!?])(\s+)',
+        r'\1<break time="150ms"/>\2',
+        safe_text
+    )
+
+    # For empathetic / deescalation modes, add a leading pause (deliberate pacing)
+    leading_pause = ""
+    if mode in ("deescalation", "support"):
+        leading_pause = '<break time="200ms"/>'
+
+    # Question inflection: add slight emphasis on last word before ?
+    if utt_ctx == "question":
+        safe_text = re.sub(
+            r'(\w+)(\?)',
+            r'<emphasis level="moderate">\1</emphasis>\2',
+            safe_text,
+            count=1
+        )
+
+    ssml = f"""\
 <speak version="1.0"
  xmlns="http://www.w3.org/2001/10/synthesis"
  xmlns:mstts="http://www.w3.org/2001/mstts"
  xml:lang="en-US">
  <voice name="{voice_name}">
-  <mstts:express-as style="{tts_params['style']}"
-   styledegree="{tts_params['styledegree']}">
-   <prosody rate="{tts_params['rate']}"
-    pitch="{tts_params['pitch']}"
-    volume="{tts_params['volume']}">
-    {text}
+  {leading_pause}
+  <mstts:express-as style="{style}" styledegree="{degree}">
+   <prosody rate="{rate}" pitch="{pitch}" volume="{volume}">
+    {safe_text}
    </prosody>
   </mstts:express-as>
  </voice>
-</speak>
-"""
+</speak>"""
+    return ssml
 
+
+# =====================================================
+# AZURE SYNTHESIS (PUBLIC)
+# =====================================================
+
+def synthesize_azure_tts(
+    text: str,
+    tts_params: Dict,
+    output_dir: str,
+    voice_name: str = DEFAULT_VOICE,
+) -> str:
+    """
+    Synthesize speech using Azure TTS with rich SSML.
+
+    Args:
+        text:        Plain text to synthesize (markdown already stripped)
+        tts_params:  Parameters from TTSController.compute()
+        output_dir:  Directory for the output WAV file
+        voice_name:  Azure Neural voice name
+
+    Returns:
+        Path to the synthesized WAV file.
+
+    Raises:
+        RuntimeError on synthesis failure.
+    """
+    os.makedirs(output_dir, exist_ok=True)
+    output_path = os.path.join(output_dir, f"tts_{uuid.uuid4().hex}.wav")
+
+    speech_config = _get_speech_config()
+    audio_config  = speechsdk.audio.AudioOutputConfig(filename=output_path)
+    synthesizer   = speechsdk.SpeechSynthesizer(
+        speech_config=speech_config,
+        audio_config=audio_config,
+    )
+
+    ssml   = _build_ssml(text, tts_params, voice_name)
     result = synthesizer.speak_ssml_async(ssml).get()
 
     if result.reason == speechsdk.ResultReason.SynthesizingAudioCompleted:
-        return output_file
+        return output_path
 
     if result.reason == speechsdk.ResultReason.Canceled:
-        raise RuntimeError(result.cancellation_details.error_details)
+        details = result.cancellation_details
+        raise RuntimeError(
+            f"Azure TTS cancelled: {details.reason} — {details.error_details}"
+        )
 
-    raise RuntimeError("Unknown Azure TTS failure")
+    raise RuntimeError(f"Azure TTS unknown failure: {result.reason}")

@@ -12,7 +12,6 @@ from dataclasses import dataclass
 import numpy as np
 
 from memory_store import QdrantMemoryStore
-from research_eval_collector import EvalCollector
 
 
 @dataclass
@@ -126,17 +125,7 @@ class MemoryOrchestrator:
         else:
             reason = "Below importance threshold"
         
-        EvalCollector.record_memory_decision(
-    session_id="global",        # you can pass session_id if you thread it through
-    turn_number=0,              # optional; leave 0 if not easily available
-    should_store=should_store,
-    importance_score=importance,
-    reason=reason,
-    emotional_intensity=emotional_intensity,
-    topic_shift_strength=topic_shift_strength,
-    self_reference=user_self_reference,
-    novelty=novelty_score,
-)
+
 
 
         return MemoryDecision(

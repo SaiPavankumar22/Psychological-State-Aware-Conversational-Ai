@@ -1,674 +1,705 @@
-# memory_store.py
-"""
-Enterprise-grade vector memory store using Qdrant.
-Manages episodic and semantic long-term memory with reinforcement learning.
-"""
+# memory_store.py — Enterprise Qdrant Vector Memory Store (v2)
+#
+# Bug fixes over v1:
+#   - Removed spurious `from xmlrpc import client` that shadowed the client variable
+#   - store_semantic_memory: added full try/except + None-embedding guard
+#   - reinforce_memory: uses with_vectors=True so point.vector is populated
+#   - FieldCondition range filter: uses qdrant_client.models.Range (not raw dict)
+#   - _fallback_mode: no longer permanently latched — retried on next is_available()
+#   - retrieve_episodic_memories: min_importance lowered to 0.4 so new memories surface
+#   - Cleaner connection error messages
+#
+# Design:
+#   - Lazy initialisation (no Qdrant calls at import time)
+#   - Thread-safe singleton via lazy property pattern
+#   - Graceful degradation: all public methods return safe defaults when unavailable
 
 import os
 import time
-import asyncio
 import logging
-from typing import List, Dict, Optional, Any
+from typing import Any, Dict, List, Optional
 from dataclasses import dataclass
 from datetime import datetime
 import uuid
-from xmlrpc import client
+
 from tenacity import retry, stop_after_attempt, wait_exponential
 
 from qdrant_client import QdrantClient
 from qdrant_client.models import (
     Distance,
-    VectorParams,
-    PointStruct,
-    Filter,
     FieldCondition,
+    Filter,
     MatchValue,
-    SearchRequest
+    PayloadSchemaType,
+    PointStruct,
+    Range,
+    VectorParams,
 )
 from sentence_transformers import SentenceTransformer
 
 logger = logging.getLogger(__name__)
 
 
+# =====================================================
+# DATA TYPES
+# =====================================================
+
 @dataclass
 class Memory:
-    """Memory entry structure"""
-    id: str
-    content: str
-    embedding: List[float]
-    user_id: str
-    session_id: Optional[str]
-    memory_type: str
-    topic: Optional[str]
-    valence: Optional[float]
-    stress: Optional[float]
-    importance_score: float
-    reinforcement_count: int
-    confidence: Optional[float]
-    created_at: str
-    updated_at: str
-    metadata: Dict[str, Any]
+    """Structured memory entry (return type, not stored directly)."""
+    id:                 str
+    content:            str
+    user_id:            str
+    session_id:         Optional[str]
+    memory_type:        str
+    topic:              Optional[str]
+    valence:            Optional[float]
+    stress:             Optional[float]
+    importance_score:   float
+    reinforcement_count:int
+    confidence:         Optional[float]
+    created_at:         str
+    updated_at:         str
+    metadata:           Dict[str, Any]
 
+
+# =====================================================
+# QDRANT MEMORY STORE
+# =====================================================
 
 class QdrantMemoryStore:
     """
-    Vector memory store using Qdrant for long-term memory.
-    
-    Collections:
-    - episodic_memory: Conversational episodes with emotional context
-    - semantic_memory: User preferences, facts, behaviors
-    
-    Features:
-    - Thread-safe initialization with lock
+    Vector memory store backed by Qdrant.
+
+    Collections
+    -----------
+    episodic_memory  : Conversation episodes with emotional context
+    semantic_memory  : User preferences, facts, and behaviour patterns
+
+    Features
+    --------
+    - Lazy initialisation (zero cost at import time)
     - Automatic retry with exponential backoff (3 attempts)
-    - Connection resilience & fallback modes
+    - Full graceful degradation — every method is safe when Qdrant is down
+    - Composite relevance scoring: similarity + importance + recency + reinforcement
     """
-    
+
     EPISODIC_COLLECTION = "episodic_memory"
     SEMANTIC_COLLECTION = "semantic_memory"
-    VECTOR_SIZE = 384  # all-MiniLM-L6-v2 dimension
-    
+    VECTOR_SIZE         = 384   # all-MiniLM-L6-v2
+
     def __init__(self):
-        """Initialize Qdrant client and embedding model (lazy loading)"""
-        self._client: Optional[QdrantClient] = None
-        self._embedder: Optional[SentenceTransformer] = None
-        self._initialized = False
-        self._fallback_mode = False  # Use fallback if Qdrant unavailable
-    
+        self._client:      Optional[QdrantClient]       = None
+        self._embedder:    Optional[SentenceTransformer] = None
+        self._initialized: bool  = False
+        self._fallback:    bool  = False
+        self._last_retry:  float = 0.0           # Used for cooldown before retrying
+
+    # ------------------------------------------------------------------
+    # INITIALISATION
+    # ------------------------------------------------------------------
+
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10))
-    def _connect_qdrant(self):
-        """Connect to Qdrant with retry logic (handles both local and cloud URLs)"""
-        qdrant_url = os.environ.get("QDRANT_URL")
-        qdrant_port = os.environ.get("QDRANT_PORT")
-        api_key = os.environ.get("QDRANT_API_KEY")
-        
+    def _connect_qdrant(self) -> QdrantClient:
+        """Connect to Qdrant with retry. Supports cloud (https) and local (http) URLs."""
+        url     = os.environ.get("QDRANT_URL", "")
+        port    = os.environ.get("QDRANT_PORT", "")
+        api_key = os.environ.get("QDRANT_API_KEY", "")
+
+        if not url:
+            raise ValueError("QDRANT_URL not set in environment")
         if not api_key:
-            raise ValueError("QDRANT_API_KEY not found in environment")
-        if not qdrant_url:
-            raise ValueError("QDRANT_URL not found in environment")
-        
-        # Handle both cloud URLs (https://...) and local URLs (http://localhost)
-        if qdrant_url.startswith("https://"):
-            # Cloud URL - use as-is (port already included in domain)
-            full_url = qdrant_url
-            logger.debug("🔗 Using Qdrant Cloud URL (HTTPS)")
-        elif qdrant_url.startswith("http://"):
-            # Local URL - append port if provided and not already in URL
-            if qdrant_port and f":{qdrant_port}" not in qdrant_url:
-                full_url = f"{qdrant_url}:{qdrant_port}"
-            else:
-                full_url = qdrant_url
-            logger.debug("🔗 Using Qdrant Local URL (HTTP)")
+            raise ValueError("QDRANT_API_KEY not set in environment")
+
+        # Resolve full URL
+        if url.startswith("https://"):
+            full_url = url
+        elif url.startswith("http://"):
+            full_url = f"{url}:{port}" if port and f":{port}" not in url else url
         else:
-            # Assume it's just hostname, needs protocol
-            if qdrant_port:
-                full_url = f"http://{qdrant_url}:{qdrant_port}"
-            else:
-                full_url = f"http://{qdrant_url}:6333"  # Default Qdrant port
-            logger.debug("🔗 Constructed Qdrant URL from hostname")
-        
+            full_url = f"http://{url}:{port or '6333'}"
+
         logger.info(f"🔗 Connecting to Qdrant: {full_url}")
-        
-        try:
-            # Create client with timeout
-            client = QdrantClient(
-                url=full_url,
-                api_key=api_key,
-                timeout=15.0  # Increased timeout for retries
-            )
-            
-            # Test connection with health check
-            health = client.health_check()
-            if not health:
-                raise RuntimeError("Qdrant health check failed")
-            
-            logger.info("✅ Qdrant connection successful")
-            return client
-            
-        except Exception as e:
-            logger.error(f"❌ Qdrant connection failed: {type(e).__name__}: {e}")
-            raise
-        return client
-    
+
+        qdrant = QdrantClient(url=full_url, api_key=api_key, timeout=15.0)
+
+        # Verify connectivity: get_collections() is available in all qdrant-client versions
+        # and requires a successful authenticated round-trip to the server.
+        # health_check() was removed from QdrantClient in newer library versions.
+        qdrant.get_collections()
+
+        logger.info("✅ Qdrant connected successfully")
+        return qdrant
+
     def _ensure_initialized(self):
-        """Lazy initialization of client and embedder"""
+        """Lazy initialise embedder + Qdrant client + collections."""
         if self._initialized:
             return
-        
-        try:
-            # Initialize embedder first (cheaper than Qdrant)
-            logger.info("🧠 Loading sentence-transformers model...")
-            self._embedder = SentenceTransformer("all-MiniLM-L6-v2")
-            logger.info("✅ Embedder loaded")
-            
-            # Initialize Qdrant client with retry
-            self._client = self._connect_qdrant()
-            
-            # Ensure collections exist
-            self._create_collections()
-            
-            self._initialized = True
-            logger.info("✅ Memory store fully initialized")
-            
-        except Exception as e:
-            logger.error(f"❌ Memory store initialization failed: {e}")
-            self._fallback_mode = True
-            logger.warning("⚠️ Entering fallback mode: Memory functionality disabled")
-            raise
-    
+
+        logger.info("🧠 Initialising memory store...")
+
+        # Embedder first (no network)
+        self._embedder = SentenceTransformer("all-MiniLM-L6-v2")
+        logger.info("✅ Sentence transformer loaded")
+
+        # Qdrant client
+        self._client = self._connect_qdrant()
+
+        # Ensure collections exist
+        self._create_collections()
+
+        self._initialized = True
+        logger.info("✅ Memory store fully initialised")
+
+    def _create_collections(self):
+        """Create Qdrant collections and their payload indexes if they don't exist."""
+        if not self._client:
+            return
+
+        existing = {c.name for c in self._client.get_collections().collections}
+
+        for name in (self.EPISODIC_COLLECTION, self.SEMANTIC_COLLECTION):
+            if name not in existing:
+                self._client.create_collection(
+                    collection_name=name,
+                    vectors_config=VectorParams(
+                        size=self.VECTOR_SIZE,
+                        distance=Distance.COSINE,
+                    ),
+                )
+                logger.info(f"📦 Created collection: {name}")
+
+        # Ensure payload indexes exist for every field used in Filter conditions.
+        # create_payload_index() is idempotent — safe to call on existing indexes
+        # and safe to call on pre-existing collections created before this fix.
+        # Without indexes Qdrant falls back to a full post-filter scan.
+        _indexes = {
+            self.EPISODIC_COLLECTION: [
+                ("user_id",          PayloadSchemaType.KEYWORD),  # MatchValue filter
+                ("importance_score", PayloadSchemaType.FLOAT),    # Range filter
+            ],
+            self.SEMANTIC_COLLECTION: [
+                ("user_id",   PayloadSchemaType.KEYWORD),         # MatchValue filter
+                ("confidence", PayloadSchemaType.FLOAT),          # Range filter
+            ],
+        }
+        for collection, fields in _indexes.items():
+            for field_name, field_type in fields:
+                try:
+                    self._client.create_payload_index(
+                        collection_name=collection,
+                        field_name=field_name,
+                        field_schema=field_type,
+                        wait=True,
+                    )
+                    logger.info(
+                        f"🗂️  Payload index ensured: {collection}.{field_name} "
+                        f"({field_type.value})"
+                    )
+                except Exception as e:
+                    logger.warning(
+                        f"⚠️ Could not create payload index "
+                        f"{collection}.{field_name}: {e}"
+                    )
+
+    # ------------------------------------------------------------------
+    # PROPERTY ACCESSORS (with graceful fallback)
+    # ------------------------------------------------------------------
+
     @property
     def client(self) -> Optional[QdrantClient]:
-        """Get Qdrant client (initializes if needed, returns None in fallback)"""
+        if self._fallback:
+            # Allow retry after 60s cooldown
+            if time.time() - self._last_retry > 60.0:
+                self._fallback    = False
+                self._initialized = False
+            else:
+                return None
         try:
-            if not self._initialized and not self._fallback_mode:
+            if not self._initialized:
                 self._ensure_initialized()
             return self._client
-        except Exception:
-            self._fallback_mode = True
+        except Exception as e:
+            # Unwrap tenacity RetryError to expose the actual root exception
+            from tenacity import RetryError
+            if isinstance(e, RetryError) and e.last_attempt.failed:
+                root_cause = e.last_attempt.exception()
+                logger.error(
+                    f"❌ Qdrant init failed (RetryError). Root cause: {type(root_cause).__name__}: {root_cause}",
+                    exc_info=root_cause,
+                )
+            else:
+                logger.error(f"❌ Qdrant init failed: {e}", exc_info=True)
+            self._fallback   = True
+            self._last_retry = time.time()
             return None
-    
+
     @property
     def embedder(self) -> Optional[SentenceTransformer]:
-        """Get embedder (initializes if needed)"""
+        if self._fallback:
+            return None
         try:
-            if not self._initialized and not self._fallback_mode:
+            if not self._initialized:
                 self._ensure_initialized()
             return self._embedder
         except Exception:
-            self._fallback_mode = True
+            self._fallback   = True
+            self._last_retry = time.time()
             return None
-    
+
     def is_available(self) -> bool:
-        """Check if Qdrant is available"""
-        if self._fallback_mode:
-            return False
+        """Check live Qdrant availability (refreshes fallback state)."""
         try:
-            if self.client:
-                self.client.health_check()
+            c = self.client
+            if c:
+                c.get_collections()  # health_check() removed in newer qdrant-client
                 return True
         except Exception:
-            self._fallback_mode = True
+            self._fallback   = True
+            self._last_retry = time.time()
         return False
-    
-    def _create_collections(self):
-        """Create Qdrant collections if they don't exist"""
-        try:
-            if not self.client:
-                logger.warning("⚠️ Qdrant unavailable, skipping collection creation")
-                return
-            
-            # Check if episodic_memory exists
-            collections = self.client.get_collections().collections
-            collection_names = [c.name for c in collections]
-            
-            # Create episodic_memory collection
-            if self.EPISODIC_COLLECTION not in collection_names:
-                logger.info(f"📦 Creating collection: {self.EPISODIC_COLLECTION}")
-                self.client.create_collection(
-                    collection_name=self.EPISODIC_COLLECTION,
-                    vectors_config=VectorParams(
-                        size=self.VECTOR_SIZE,
-                        distance=Distance.COSINE
-                    )
-                )
-                logger.info(f"✅ Created {self.EPISODIC_COLLECTION}")
-            
-            # Create semantic_memory collection
-            if self.SEMANTIC_COLLECTION not in collection_names:
-                logger.info(f"📦 Creating collection: {self.SEMANTIC_COLLECTION}")
-                self.client.create_collection(
-                    collection_name=self.SEMANTIC_COLLECTION,
-                    vectors_config=VectorParams(
-                        size=self.VECTOR_SIZE,
-                        distance=Distance.COSINE
-                    )
-                )
-                logger.info(f"✅ Created {self.SEMANTIC_COLLECTION}")
-        
-        except Exception as e:
-            logger.error(f"❌ Error creating collections: {e}")
-            self._fallback_mode = True
-            # Continue without throwing - let system work in degraded mode
-    
+
+    # ------------------------------------------------------------------
+    # EMBEDDING
+    # ------------------------------------------------------------------
+
     def embed_text(self, text: str) -> Optional[List[float]]:
-        """Generate embedding for text"""
+        """Generate a 384-dim embedding. Returns None on failure."""
         try:
-            if not self.embedder:
-                logger.warning("⚠️ Embedder unavailable, returning None")
+            emb = self.embedder
+            if emb is None:
                 return None
-            embedding = self.embedder.encode(text, convert_to_numpy=True)
-            return embedding.tolist()
+            return emb.encode(text, convert_to_numpy=True).tolist()
         except Exception as e:
-            logger.error(f"❌ Error embedding text: {e}")
+            logger.error(f"❌ Embedding failed: {e}")
             return None
-    
+
+    # ------------------------------------------------------------------
+    # STORE EPISODIC MEMORY
+    # ------------------------------------------------------------------
+
     def store_episodic_memory(
         self,
-        user_id: str,
-        session_id: str,
-        content: str,
-        topic: str,
-        valence: float,
-        stress: float,
+        user_id:        str,
+        session_id:     str,
+        content:        str,
+        topic:          str,
+        valence:        float,
+        stress:         float,
         importance_score: float,
-        metadata: Optional[Dict[str, Any]] = None
+        metadata:       Optional[Dict[str, Any]] = None,
     ) -> Optional[str]:
         """
-        Store an episodic memory (conversation turn).
-        Returns: memory_id (UUID of stored memory) or None if failed
+        Store a conversation episode.
+
+        Returns:
+            memory_id (str UUID) or None if failed.
         """
         try:
             if not self.client:
-                logger.warning("⚠️ Qdrant unavailable, cannot store episodic memory")
+                logger.warning("⚠️ Qdrant unavailable — episodic store skipped")
                 return None
-            
-            if not content or len(content.strip()) < 2:
-                logger.warning("❌ Invalid content for episodic memory")
+
+            if not content or len(content.strip()) < 3:
+                logger.warning("⚠️ Content too short for episodic memory")
                 return None
-            
-            memory_id = str(uuid.uuid4())
-            timestamp = datetime.now().isoformat()
-            
-            # Generate embedding
+
             embedding = self.embed_text(content)
             if not embedding:
-                logger.warning("❌ Failed to generate embedding for episodic memory")
+                logger.warning("⚠️ Embedding failed — episodic store skipped")
                 return None
-            
-            # Create point
-            point = PointStruct(
-                id=memory_id,
-                vector=embedding,
-                payload={
-                    "user_id": user_id,
-                    "session_id": session_id,
-                    "memory_type": "episodic",
-                    "content": content,
-                    "topic": topic,
-                    "valence": float(valence),
-                    "stress": float(stress),
-                    "importance_score": float(importance_score),
-                    "reinforcement_count": 1,
-                    "created_at": timestamp,
-                    "updated_at": timestamp,
-                    "metadata": metadata or {}
-                }
-            )
-            
-            # Insert
+
+            memory_id = str(uuid.uuid4())
+            now       = datetime.now().isoformat()
+
             self.client.upsert(
                 collection_name=self.EPISODIC_COLLECTION,
-                points=[point]
+                points=[PointStruct(
+                    id=memory_id,
+                    vector=embedding,
+                    payload={
+                        "user_id":            user_id,
+                        "session_id":         session_id,
+                        "memory_type":        "episodic",
+                        "content":            content,
+                        "topic":              topic,
+                        "valence":            float(valence),
+                        "stress":             float(stress),
+                        "importance_score":   float(importance_score),
+                        "reinforcement_count":1,
+                        "created_at":         now,
+                        "updated_at":         now,
+                        "metadata":           metadata or {},
+                    },
+                )],
             )
-            
-            logger.info(f"💾 Stored episodic memory: {memory_id[:8]}... (importance: {importance_score:.2f})")
+
+            logger.info(f"💾 Episodic stored: {memory_id[:8]}… (importance={importance_score:.2f})")
             return memory_id
-        
+
         except Exception as e:
-            logger.error(f"❌ Error storing episodic memory: {e}")
-            self._fallback_mode = True
+            logger.error(f"❌ Error storing episodic memory: {e}", exc_info=True)
+            self._fallback   = True
+            self._last_retry = time.time()
             return None
-    
+
+    # ------------------------------------------------------------------
+    # STORE SEMANTIC MEMORY
+    # ------------------------------------------------------------------
+
     def store_semantic_memory(
         self,
-        user_id: str,
-        content: str,
-        memory_type: str,  # "preference", "fact", "behavior"
+        user_id:        str,
+        content:        str,
+        memory_type:    str,          # "preference" | "fact" | "behavior"
         importance_score: float,
-        confidence: float = 1.0,
-        metadata: Optional[Dict[str, Any]] = None
-    ) -> str:
+        confidence:     float = 1.0,
+        metadata:       Optional[Dict[str, Any]] = None,
+    ) -> Optional[str]:
         """
-        Store a semantic memory (user preference/fact).
-        
+        Store a semantic memory (user fact/preference/behaviour).
+
         Returns:
-            memory_id: UUID of stored memory
-        """
-
-        if not self.client:
-            logger.warning("⚠️ Qdrant unavailable, cannot store semantic memory")
-            return None
-
-        memory_id = str(uuid.uuid4())
-        timestamp = datetime.now().isoformat()
-        
-        # Generate embedding
-        embedding = self.embed_text(content)
-        
-        # Create point
-        point = PointStruct(
-            id=memory_id,
-            vector=embedding,
-            payload={
-                "user_id": user_id,
-                "memory_type": memory_type,
-                "content": content,
-                "importance_score": importance_score,
-                "reinforcement_count": 1,
-                "confidence": confidence,
-                "created_at": timestamp,
-                "updated_at": timestamp,
-                "metadata": metadata or {}
-            }
-        )
-        
-        # Insert
-        self.client.upsert(
-            collection_name=self.SEMANTIC_COLLECTION,
-            points=[point]
-        )
-        
-        print(f"💾 Stored semantic memory: {memory_id[:8]}... ({memory_type}, confidence: {confidence:.2f})")
-        return memory_id
-    
-    def retrieve_episodic_memories(
-        self,
-        user_id: str,
-        query: str,
-        limit: int = 3,
-        min_importance: float = 0.5
-    ) -> List[Dict[str, Any]]:
-        """
-        Retrieve relevant episodic memories (gracefully fails on Qdrant unavailable).
-        
-        Returns: List of scored memories with content and metadata
+            memory_id or None if failed.
         """
         try:
             if not self.client:
-                logger.warning("⚠️ Qdrant unavailable, returning empty episodic memories")
-                return []
-            
-            if not query or len(query.strip()) < 2:
-                logger.warning("⚠️ Invalid query for episodic retrieval")
-                return []
-            
-            # Generate query embedding
-            query_embedding = self.embed_text(query)
-            if not query_embedding:
-                logger.warning("⚠️ Failed to generate query embedding")
-                return []
-            
-            # Search with filter
-            results = self.client.search(
-                collection_name=self.EPISODIC_COLLECTION,
-                query_vector=query_embedding,
-                query_filter=Filter(
-                    must=[
-                        FieldCondition(
-                            key="user_id",
-                            match=MatchValue(value=user_id)
-                        ),
-                        FieldCondition(
-                            key="importance_score",
-                            range={"gte": min_importance}
-                        )
-                    ]
-                ),
-                limit=limit * 2  # Over-fetch for scoring
-            )
-            
-            # Score and rank
-            scored_memories = []
-            for result in results:
-                payload = result.payload
-                
-                # Validate payload structure
-                if not payload or "created_at" not in payload:
-                    logger.warning(f"⚠️ Invalid payload for memory {result.id}, skipping")
-                    continue
-                
-                try:
-                    semantic_sim = result.score
-                    importance = payload.get("importance_score", 0.5)
-                    reinforcement = payload.get("reinforcement_count", 1)
-                    
-                    # Recency decay (exponential)
-                    created_at = datetime.fromisoformat(payload["created_at"])
-                    age_days = (datetime.now() - created_at).days
-                    recency_decay = 0.95 ** age_days  # Decay 5% per day
-                    
-                    # Composite score
-                    score = (
-                        0.5 * semantic_sim +
-                        0.2 * importance +
-                        0.2 * (1.0 - 1.0 / (1.0 + reinforcement)) +  # log-like
-                        0.1 * recency_decay
-                    )
-                    
-                    scored_memories.append({
-                        "id": result.id,
-                        "content": payload.get("content", ""),
-                        "topic": payload.get("topic", "unknown"),
-                        "valence": payload.get("valence", 0.0),
-                        "stress": payload.get("stress", 0.5),
-                        "importance": importance,
-                        "reinforcement_count": reinforcement,
-                        "score": score,
-                        "created_at": payload["created_at"]
-                    })
-                except Exception as e:
-                    logger.warning(f"⚠️ Error scoring memory {result.id}: {e}")
-                    continue
-            
-            # Sort by composite score
-            scored_memories.sort(key=lambda x: x["score"], reverse=True)
-            
-            return scored_memories[:limit]
-        
-        except Exception as e:
-            logger.error(f"❌ Error retrieving episodic memories: {e}")
-            self._fallback_mode = True
-            return []
-    
-    def retrieve_semantic_memories(
-        self,
-        user_id: str,
-        query: str,
-        limit: int = 3,
-        min_confidence: float = 0.7
-    ) -> List[Dict[str, Any]]:
-        """
-        Retrieve relevant semantic memories (preferences/facts).
-        """
-        if not self.client:
-            logger.warning("⚠️ Qdrant unavailable, returning empty semantic memories")
-            return []
+                logger.warning("⚠️ Qdrant unavailable — semantic store skipped")
+                return None
 
-        # Generate query embedding
-        query_embedding = self.embed_text(query)
-        
-        # Search with filter
-        results = self.client.search(
-            collection_name=self.SEMANTIC_COLLECTION,
-            query_vector=query_embedding,
-            query_filter=Filter(
-                must=[
-                    FieldCondition(
-                        key="user_id",
-                        match=MatchValue(value=user_id)
-                    ),
-                    FieldCondition(
-                        key="confidence",
-                        range={
-                            "gte": min_confidence
-                        }
-                    )
-                ]
-            ),
-            limit=limit * 2
-        )
-        
-        # Score and rank
-        scored_memories = []
-        for result in results:
-            payload = result.payload
-            
-            semantic_sim = result.score
-            importance = payload.get("importance_score", 0.5)
-            reinforcement = payload.get("reinforcement_count", 1)
-            confidence = payload.get("confidence", 1.0)
-            
-            # Recency decay
-            created_at = datetime.fromisoformat(payload["created_at"])
-            age_days = (datetime.now() - created_at).days
-            recency_decay = 0.95 ** age_days
-            
-            # Composite score
-            score = (
-                0.5 * semantic_sim +
-                0.2 * importance +
-                0.15 * (1.0 - 1.0 / (1.0 + reinforcement)) +
-                0.1 * recency_decay +
-                0.05 * confidence
+            if not content or len(content.strip()) < 3:
+                logger.warning("⚠️ Content too short for semantic memory")
+                return None
+
+            embedding = self.embed_text(content)
+            if not embedding:
+                logger.warning("⚠️ Embedding failed — semantic store skipped")
+                return None
+
+            memory_id = str(uuid.uuid4())
+            now       = datetime.now().isoformat()
+
+            self.client.upsert(
+                collection_name=self.SEMANTIC_COLLECTION,
+                points=[PointStruct(
+                    id=memory_id,
+                    vector=embedding,
+                    payload={
+                        "user_id":            user_id,
+                        "memory_type":        memory_type,
+                        "content":            content,
+                        "importance_score":   float(importance_score),
+                        "reinforcement_count":1,
+                        "confidence":         float(confidence),
+                        "created_at":         now,
+                        "updated_at":         now,
+                        "metadata":           metadata or {},
+                    },
+                )],
             )
-            
-            scored_memories.append({
-                "id": result.id,
-                "content": payload["content"],
-                "memory_type": payload.get("memory_type", "fact"),
-                "importance": importance,
-                "confidence": confidence,
-                "reinforcement_count": reinforcement,
-                "score": score,
-                "created_at": payload["created_at"]
-            })
-        
-        scored_memories.sort(key=lambda x: x["score"], reverse=True)
-        
-        return scored_memories[:limit]
-    
-    def find_similar_memory(
-        self,
-        collection_name: str,
-        user_id: str,
-        content: str,
-        similarity_threshold: float = 0.85
-    ) -> Optional[Dict[str, Any]]:
-        """
-        Check if similar memory exists (for reinforcement).
-        
-        Returns:
-            Memory dict if found, None otherwise
-        """
-        if not self.client:
-            logger.warning("⚠️ Qdrant unavailable, cannot find similar memory")
+
+            logger.info(f"💾 Semantic stored: {memory_id[:8]}… ({memory_type}, conf={confidence:.2f})")
+            return memory_id
+
+        except Exception as e:
+            logger.error(f"❌ Error storing semantic memory: {e}", exc_info=True)
+            self._fallback   = True
+            self._last_retry = time.time()
             return None
 
-        query_embedding = self.embed_text(content)
-        
-        results = self.client.search(
-            collection_name=collection_name,
-            query_vector=query_embedding,
-            query_filter=Filter(
-                must=[
-                    FieldCondition(
-                        key="user_id",
-                        match=MatchValue(value=user_id)
+    # ------------------------------------------------------------------
+    # RETRIEVE EPISODIC MEMORIES
+    # ------------------------------------------------------------------
+
+    def retrieve_episodic_memories(
+        self,
+        user_id:       str,
+        query:         str,
+        limit:         int   = 3,
+        min_importance:float = 0.40,   # Lowered from 0.5 so new memories appear
+    ) -> List[Dict[str, Any]]:
+        """
+        Retrieve relevant episodic memories via semantic search + composite scoring.
+
+        Composite score = 0.50 * semantic_sim
+                        + 0.20 * importance
+                        + 0.20 * log_reinforcement
+                        + 0.10 * recency_decay
+        """
+        try:
+            if not self.client:
+                return []
+
+            if not query or len(query.strip()) < 2:
+                return []
+
+            embedding = self.embed_text(query)
+            if not embedding:
+                return []
+
+            # query_points() replaces the removed search() API.
+            # It uses `query=` (not `query_vector=`) and returns QueryResponse;
+            # the actual ScoredPoint list is at response.points.
+            response = self.client.query_points(
+                collection_name=self.EPISODIC_COLLECTION,
+                query=embedding,
+                query_filter=Filter(
+                    must=[
+                        FieldCondition(key="user_id", match=MatchValue(value=user_id)),
+                        FieldCondition(
+                            key="importance_score",
+                            range=Range(gte=min_importance),
+                        ),
+                    ]
+                ),
+                limit=limit * 3,  # Over-fetch; composite re-rank selects top
+            )
+
+            scored: List[Dict[str, Any]] = []
+            for r in response.points:
+                p = r.payload
+                if not p or "created_at" not in p:
+                    continue
+                try:
+                    age_days      = (datetime.now() - datetime.fromisoformat(p["created_at"])).days
+                    recency_decay = 0.95 ** age_days
+                    reinf         = p.get("reinforcement_count", 1)
+                    importance    = p.get("importance_score", 0.5)
+
+                    score = (
+                        0.50 * r.score +
+                        0.20 * importance +
+                        0.20 * (1.0 - 1.0 / (1.0 + reinf)) +
+                        0.10 * recency_decay
                     )
-                ]
-            ),
-            limit=1
-        )
-        
-        if results and results[0].score >= similarity_threshold:
-            return {
-                "id": results[0].id,
-                "payload": results[0].payload,
-                "similarity": results[0].score
-            }
-        
-        return None
-    
+
+                    scored.append({
+                        "id":                  r.id,
+                        "content":             p.get("content", ""),
+                        "topic":               p.get("topic", "general"),
+                        "valence":             p.get("valence", 0.0),
+                        "stress":              p.get("stress", 0.5),
+                        "importance":          importance,
+                        "reinforcement_count": reinf,
+                        "score":               score,
+                        "created_at":          p["created_at"],
+                    })
+                except Exception as inner:
+                    logger.warning(f"⚠️ Skipping malformed memory {r.id}: {inner}")
+
+            scored.sort(key=lambda x: x["score"], reverse=True)
+            return scored[:limit]
+
+        except Exception as e:
+            logger.error(f"❌ Episodic retrieval failed: {e}", exc_info=True)
+            self._fallback   = True
+            self._last_retry = time.time()
+            return []
+
+    # ------------------------------------------------------------------
+    # RETRIEVE SEMANTIC MEMORIES
+    # ------------------------------------------------------------------
+
+    def retrieve_semantic_memories(
+        self,
+        user_id:       str,
+        query:         str,
+        limit:         int   = 3,
+        min_confidence:float = 0.60,   # Lowered slightly for broader recall
+    ) -> List[Dict[str, Any]]:
+        """
+        Retrieve relevant semantic memories (preferences / facts).
+        """
+        try:
+            if not self.client:
+                return []
+
+            embedding = self.embed_text(query)
+            if not embedding:
+                return []
+
+            # query_points() replaces the removed search() API.
+            response = self.client.query_points(
+                collection_name=self.SEMANTIC_COLLECTION,
+                query=embedding,
+                query_filter=Filter(
+                    must=[
+                        FieldCondition(key="user_id", match=MatchValue(value=user_id)),
+                        FieldCondition(
+                            key="confidence",
+                            range=Range(gte=min_confidence),
+                        ),
+                    ]
+                ),
+                limit=limit * 2,
+            )
+
+            scored: List[Dict[str, Any]] = []
+            for r in response.points:
+                p = r.payload
+                if not p or "created_at" not in p:
+                    continue
+                try:
+                    age_days      = (datetime.now() - datetime.fromisoformat(p["created_at"])).days
+                    recency_decay = 0.95 ** age_days
+                    importance    = p.get("importance_score", 0.5)
+                    reinf         = p.get("reinforcement_count", 1)
+                    confidence    = p.get("confidence", 1.0)
+
+                    score = (
+                        0.50 * r.score +
+                        0.20 * importance +
+                        0.15 * (1.0 - 1.0 / (1.0 + reinf)) +
+                        0.10 * recency_decay +
+                        0.05 * confidence
+                    )
+
+                    scored.append({
+                        "id":                  r.id,
+                        "content":             p.get("content", ""),
+                        "memory_type":         p.get("memory_type", "fact"),
+                        "importance":          importance,
+                        "confidence":          confidence,
+                        "reinforcement_count": reinf,
+                        "score":               score,
+                        "created_at":          p["created_at"],
+                    })
+                except Exception as inner:
+                    logger.warning(f"⚠️ Skipping malformed semantic memory {r.id}: {inner}")
+
+            scored.sort(key=lambda x: x["score"], reverse=True)
+            return scored[:limit]
+
+        except Exception as e:
+            logger.error(f"❌ Semantic retrieval failed: {e}", exc_info=True)
+            self._fallback   = True
+            self._last_retry = time.time()
+            return []
+
+    # ------------------------------------------------------------------
+    # FIND SIMILAR MEMORY (for reinforcement check)
+    # ------------------------------------------------------------------
+
+    def find_similar_memory(
+        self,
+        collection_name:    str,
+        user_id:            str,
+        content:            str,
+        similarity_threshold: float = 0.85,
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Find a highly similar existing memory (for reinforcement instead of duplication).
+
+        Returns a dict with keys: id, payload, similarity — or None.
+        """
+        try:
+            if not self.client:
+                return None
+
+            embedding = self.embed_text(content)
+            if not embedding:
+                return None
+
+            # query_points() replaces the removed search() API.
+            response = self.client.query_points(
+                collection_name=collection_name,
+                query=embedding,
+                query_filter=Filter(
+                    must=[FieldCondition(key="user_id", match=MatchValue(value=user_id))]
+                ),
+                limit=1,
+            )
+
+            results = response.points
+            if results and results[0].score >= similarity_threshold:
+                return {
+                    "id":         results[0].id,
+                    "payload":    results[0].payload,
+                    "similarity": results[0].score,
+                }
+            return None
+
+        except Exception as e:
+            logger.error(f"❌ find_similar_memory failed: {e}", exc_info=True)
+            return None
+
+    # ------------------------------------------------------------------
+    # REINFORCE MEMORY
+    # ------------------------------------------------------------------
+
     def reinforce_memory(
         self,
         collection_name: str,
-        memory_id: str,
-        importance_boost: float = 0.1
+        memory_id:       str,
+        importance_boost:float = 0.10,
     ):
-        """Reinforce existing memory (increase count and importance)"""
+        """
+        Increment reinforcement_count and boost importance_score for an existing memory.
+        Uses with_vectors=True to correctly fetch the vector for re-upsert.
+        """
         try:
             if not self.client:
-                logger.warning("⚠️ Qdrant unavailable, cannot reinforce memory")
                 return
-            
-            # Get current memory
-            result = self.client.retrieve(
+
+            # Must request vectors explicitly (default retrieve() omits them)
+            results = self.client.retrieve(
                 collection_name=collection_name,
-                ids=[memory_id]
+                ids=[memory_id],
+                with_vectors=True,
             )
-            
-            if not result:
-                logger.warning(f"⚠️ Memory {memory_id} not found")
+
+            if not results:
+                logger.warning(f"⚠️ Memory {memory_id[:8]}… not found for reinforcement")
                 return
-            
-            point = result[0]
-            payload = point.payload
-            
-            # Update fields
+
+            point   = results[0]
+            payload = dict(point.payload)
+            vector  = point.vector
+
+            if vector is None:
+                logger.warning(f"⚠️ No vector returned for {memory_id[:8]}… — skipping reinforce")
+                return
+
             payload["reinforcement_count"] = payload.get("reinforcement_count", 1) + 1
-            payload["importance_score"] = min(
+            payload["importance_score"]    = min(
                 1.0,
-                payload.get("importance_score", 0.5) + importance_boost
+                payload.get("importance_score", 0.5) + importance_boost,
             )
             payload["updated_at"] = datetime.now().isoformat()
-            
-            # Upsert
+
             self.client.upsert(
                 collection_name=collection_name,
-                points=[
-                    PointStruct(
-                        id=memory_id,
-                        vector=point.vector,
-                        payload=payload
-                    )
-                ]
+                points=[PointStruct(id=memory_id, vector=vector, payload=payload)],
             )
-            
-            logger.info(f"🔄 Reinforced memory {memory_id[:8]}... (count: {payload['reinforcement_count']})")
-        
+
+            logger.info(
+                f"🔄 Reinforced {memory_id[:8]}… "
+                f"(count={payload['reinforcement_count']}, "
+                f"importance={payload['importance_score']:.2f})"
+            )
+
         except Exception as e:
-            logger.error(f"❌ Error reinforcing memory: {e}")
-            self._fallback_mode = True
-    
+            logger.error(f"❌ reinforce_memory failed: {e}", exc_info=True)
+
+    # ------------------------------------------------------------------
+    # STATS
+    # ------------------------------------------------------------------
+
     def get_memory_stats(self, user_id: str) -> Dict[str, int]:
-        """Get memory statistics for a user"""
+        """Get per-user memory counts. Returns zeros on failure."""
         try:
             if not self.client:
-                logger.warning("⚠️ Qdrant unavailable, returning zero stats")
                 return {"episodic_count": 0, "semantic_count": 0, "total": 0}
-            
-            # Count episodic memories
-            episodic_count = self.client.count(
-                collection_name=self.EPISODIC_COLLECTION,
-                count_filter=Filter(
-                    must=[
-                        FieldCondition(
-                            key="user_id",
-                            match=MatchValue(value=user_id)
-                        )
-                    ]
-                )
+
+            uid_filter = Filter(
+                must=[FieldCondition(key="user_id", match=MatchValue(value=user_id))]
             )
-            
-            # Count semantic memories
-            semantic_count = self.client.count(
-                collection_name=self.SEMANTIC_COLLECTION,
-                count_filter=Filter(
-                    must=[
-                        FieldCondition(
-                            key="user_id",
-                            match=MatchValue(value=user_id)
-                        )
-                    ]
-                )
-            )
-            
-            return {
-                "episodic_count": episodic_count.count,
-                "semantic_count": semantic_count.count,
-                "total": episodic_count.count + semantic_count.count
-            }
+
+            ep  = self.client.count(self.EPISODIC_COLLECTION, count_filter=uid_filter).count
+            sem = self.client.count(self.SEMANTIC_COLLECTION, count_filter=uid_filter).count
+
+            return {"episodic_count": ep, "semantic_count": sem, "total": ep + sem}
+
         except Exception as e:
-            logger.error(f"❌ Error getting stats: {e}")
-            self._fallback_mode = True
+            logger.error(f"❌ get_memory_stats failed: {e}")
             return {"episodic_count": 0, "semantic_count": 0, "total": 0}

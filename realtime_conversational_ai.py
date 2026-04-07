@@ -15,8 +15,6 @@ from datetime import datetime
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
 from fastapi.responses import HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
-from research_eval_collector import EvalCollector
-
 # =====================================================
 # LOGGING SETUP
 # =====================================================
@@ -84,7 +82,6 @@ image = (
     .add_local_file("tts_azure.py", remote_path="/root/tts_azure.py")
     .add_local_file("llm_client.py", remote_path="/root/llm_client.py")
     .add_local_file("services.py", remote_path="/root/services.py")
-    .add_local_file("research_eval_collector.py", remote_path="/root/research_eval_collector.py")
 )
 
 # =====================================================
@@ -491,27 +488,6 @@ class ConversationalAI:
             tts_params = tts_controller.compute(adaptive_state)
             logger.debug(f"🎵 TTS: style={tts_params['style']}, degree={tts_params['styledegree']}, "
                   f"rate={tts_params['rate']}, pitch={tts_params['pitch']}")
-            EvalCollector.record_turn(
-    session_id=session_id,
-    turn_number=current_turn,
-    transcript=transcript,
-    instant_state=instant_psychological_state,
-    adaptive_state=adaptive_state,
-    interaction_mode=adaptive_state.get("mode", "neutral"),
-    tts_params=tts_params,
-    topic=conv_state.dialogue_state.primary_topic,
-    topic_confidence=topic_confidence,
-    top_text_emotions=dict(sorted(
-        asr_result.get('text_emotion', {}).items(),
-        key=lambda x: x[1], reverse=True
-    )[:5]),
-    ser_dict=ser_dict,
-    memory_retrieved=should_retrieve,
-    emotional_shift_detected=emotional_shift_detected,
-    shift_dimension=shift_dimension,
-    acoustic_features=acoustic_features,
-)
-            
             # === GENERATE TTS ===
             tts_audio_bytes = None
             try:
@@ -2306,19 +2282,6 @@ class ConversationalAI:
             """Basic health check - Modal's health prober"""
             logger.debug("📊 Health check")
             return {"status": "healthy"}
-        @web_app.get("/api/eval/summary")
-        async def get_eval_summary():
-            """Get live research evaluation metrics"""
-            return EvalCollector.compute_metrics()
-
-        @web_app.post("/api/eval/save")
-        async def save_eval_report():
-            """Save evaluation report to JSON and CSV"""
-            EvalCollector.save_report("/tmp/eval_results.json")
-            EvalCollector.save_csv("/tmp/eval_turns.csv")
-            EvalCollector.print_summary()
-            return {"status": "saved", "turns": len(EvalCollector._turns)}
-        
         @web_app.get("/readiness")
         async def readiness_check():
             """Readiness check - Modal restarts if fails"""
