@@ -65,6 +65,7 @@ image = image.pip_install(
 # Layer 4: Audio & API dependencies
 image = image.pip_install(
     "openai",
+    "openai-whisper",
     "azure-cognitiveservices-speech",
     "librosa",
     "soundfile",

@@ -4,7 +4,7 @@ import os
 import time
 import torch
 import librosa
-import azure.cognitiveservices.speech as speechsdk
+import whisper
 
 from transformers import (
     AutoTokenizer,
@@ -150,33 +150,28 @@ def extract_acoustic_features(audio_path: str, transcript: str) -> dict:
 
 
 # ===============================
-# ASR (Azure Speech) + TEXT EMOTION
+# ASR (Local Whisper) + TEXT EMOTION
 # ===============================
 
 class ASRTextService:
     """
-    ASR via Azure Speech-to-Text + Text Emotion via RoBERTa.
+    ASR via local openai-whisper (no OpenAI API) + Text Emotion via RoBERTa.
 
-    Reuses the same Azure Speech credentials already used for TTS:
-      AZURE_TTS_KEY / AZURE_TTS_REGION
+    Model size is controlled by WHISPER_MODEL env var (default: "small").
+    Common options: tiny, base, small, medium, large-v3
     """
 
     def __init__(self):
-        self.azure_key = os.getenv("AZURE_TTS_KEY") or os.getenv("AZURE_SPEECH_KEY")
-        self.azure_region = (
-            os.getenv("AZURE_TTS_REGION")
-            or os.getenv("AZURE_SPEECH_REGION")
-            or "centralindia"
-        )
-        if not self.azure_key:
-            raise RuntimeError(
-                "AZURE_TTS_KEY (or AZURE_SPEECH_KEY) environment variable not set"
-            )
-
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
+        self.whisper_model_name = os.getenv("WHISPER_MODEL", "small")
 
-        print(f"🚀 Initializing Azure ASR (region={self.azure_region})")
+        print(f"🚀 Loading Whisper ASR ({self.whisper_model_name}) on {self.device}")
         print(f"🚀 Loading Text Emotion model on {self.device}")
+
+        self.whisper_model = whisper.load_model(
+            self.whisper_model_name,
+            device=self.device,
+        )
 
         self.tokenizer = AutoTokenizer.from_pretrained(
             "SamLowe/roberta-base-go_emotions"
@@ -191,55 +186,21 @@ class ASRTextService:
 
         print("✅ ASR + Text Emotion models loaded")
 
-    def _transcribe_azure(self, audio_path: str) -> str:
-        """
-        Transcribe a WAV file with Azure continuous speech recognition.
-        Continuous mode is used so longer conversational turns are not truncated.
-        """
-        speech_config = speechsdk.SpeechConfig(
-            subscription=self.azure_key,
-            region=self.azure_region,
+    def _transcribe_whisper(self, audio_path: str) -> str:
+        """Transcribe a WAV file with local Whisper."""
+        result = self.whisper_model.transcribe(
+            audio_path,
+            language="en",
+            fp16=(self.device == "cuda"),
+            verbose=False,
         )
-        speech_config.speech_recognition_language = "en-US"
-
-        audio_config = speechsdk.audio.AudioConfig(filename=audio_path)
-        recognizer = speechsdk.SpeechRecognizer(
-            speech_config=speech_config,
-            audio_config=audio_config,
-        )
-
-        parts = []
-        done = False
-
-        def recognized(evt):
-            if evt.result.reason == speechsdk.ResultReason.RecognizedSpeech:
-                text = (evt.result.text or "").strip()
-                if text:
-                    parts.append(text)
-
-        def stop(_evt):
-            nonlocal done
-            done = True
-
-        recognizer.recognized.connect(recognized)
-        recognizer.session_stopped.connect(stop)
-        recognizer.canceled.connect(stop)
-
-        recognizer.start_continuous_recognition()
-        try:
-            # Wait until Azure finishes the file / session
-            while not done:
-                time.sleep(0.05)
-        finally:
-            recognizer.stop_continuous_recognition()
-
-        return " ".join(parts).strip()
+        return (result.get("text") or "").strip()
 
     def run(self, audio_path: str) -> dict:
         start = time.perf_counter()
 
-        # ---------- ASR (Azure Speech-to-Text) ----------
-        transcript = self._transcribe_azure(audio_path)
+        # ---------- ASR (local Whisper) ----------
+        transcript = self._transcribe_whisper(audio_path)
 
         # ---------- Text Emotion ----------
         inputs = self.tokenizer(
