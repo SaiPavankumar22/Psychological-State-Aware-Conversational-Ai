@@ -4,7 +4,7 @@ import os
 import time
 import torch
 import librosa
-import openai
+import azure.cognitiveservices.speech as speechsdk
 
 from transformers import (
     AutoTokenizer,
@@ -150,23 +150,32 @@ def extract_acoustic_features(audio_path: str, transcript: str) -> dict:
 
 
 # ===============================
-# ASR (OpenAI Whisper) + TEXT EMOTION
+# ASR (Azure Speech) + TEXT EMOTION
 # ===============================
 
 class ASRTextService:
     """
-    ASR via OpenAI Whisper API + Text Emotion via RoBERTa
+    ASR via Azure Speech-to-Text + Text Emotion via RoBERTa.
+
+    Reuses the same Azure Speech credentials already used for TTS:
+      AZURE_TTS_KEY / AZURE_TTS_REGION
     """
 
     def __init__(self):
-        api_key = os.getenv("OPENAI_API_KEY")
-        if not api_key:
-            raise RuntimeError("OPENAI_API_KEY environment variable not set")
+        self.azure_key = os.getenv("AZURE_TTS_KEY") or os.getenv("AZURE_SPEECH_KEY")
+        self.azure_region = (
+            os.getenv("AZURE_TTS_REGION")
+            or os.getenv("AZURE_SPEECH_REGION")
+            or "centralindia"
+        )
+        if not self.azure_key:
+            raise RuntimeError(
+                "AZURE_TTS_KEY (or AZURE_SPEECH_KEY) environment variable not set"
+            )
 
-        self.client = openai.OpenAI(api_key=api_key)
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
 
-        print("🚀 Initializing Whisper ASR (API)")
+        print(f"🚀 Initializing Azure ASR (region={self.azure_region})")
         print(f"🚀 Loading Text Emotion model on {self.device}")
 
         self.tokenizer = AutoTokenizer.from_pretrained(
@@ -179,31 +188,67 @@ class ASRTextService:
             .to(self.device)
             .eval()
         )
-        
+
         print("✅ ASR + Text Emotion models loaded")
+
+    def _transcribe_azure(self, audio_path: str) -> str:
+        """
+        Transcribe a WAV file with Azure continuous speech recognition.
+        Continuous mode is used so longer conversational turns are not truncated.
+        """
+        speech_config = speechsdk.SpeechConfig(
+            subscription=self.azure_key,
+            region=self.azure_region,
+        )
+        speech_config.speech_recognition_language = "en-US"
+
+        audio_config = speechsdk.audio.AudioConfig(filename=audio_path)
+        recognizer = speechsdk.SpeechRecognizer(
+            speech_config=speech_config,
+            audio_config=audio_config,
+        )
+
+        parts = []
+        done = False
+
+        def recognized(evt):
+            if evt.result.reason == speechsdk.ResultReason.RecognizedSpeech:
+                text = (evt.result.text or "").strip()
+                if text:
+                    parts.append(text)
+
+        def stop(_evt):
+            nonlocal done
+            done = True
+
+        recognizer.recognized.connect(recognized)
+        recognizer.session_stopped.connect(stop)
+        recognizer.canceled.connect(stop)
+
+        recognizer.start_continuous_recognition()
+        try:
+            # Wait until Azure finishes the file / session
+            while not done:
+                time.sleep(0.05)
+        finally:
+            recognizer.stop_continuous_recognition()
+
+        return " ".join(parts).strip()
 
     def run(self, audio_path: str) -> dict:
         start = time.perf_counter()
 
-        # ---------- ASR (Whisper API) ----------
-        with open(audio_path, "rb") as audio_file:
-            transcript_resp = self.client.audio.transcriptions.create(
-                file=audio_file,
-                model="whisper-1",
-                language="en",  # Strict English only
-                response_format="verbose_json",
-            )
-
-        transcript = transcript_resp.text.strip()
+        # ---------- ASR (Azure Speech-to-Text) ----------
+        transcript = self._transcribe_azure(audio_path)
 
         # ---------- Text Emotion ----------
         inputs = self.tokenizer(
-            transcript, 
+            transcript,
             return_tensors="pt",
             truncation=True,
-            max_length=512
+            max_length=512,
         ).to(self.device)
-        
+
         with torch.no_grad():
             logits = self.text_model(**inputs).logits[0]
 

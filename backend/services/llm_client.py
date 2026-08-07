@@ -1,20 +1,88 @@
-# llm_client.py (UPDATED)
+# services/llm_client.py
 
 import os
+import logging
 from typing import Dict, Optional
 from openai import OpenAI
 
-_client = None
+logger = logging.getLogger(__name__)
 
-def _get_openai_client():
-    global _client
-    if _client is None:
+# =====================================================
+# CLIENT SINGLETONS
+# =====================================================
+
+_nebius_client: Optional[OpenAI] = None
+_openai_client: Optional[OpenAI] = None
+
+NEBIUS_MODEL = "google/gemma-3-27b-it"
+OPENAI_FALLBACK_MODEL = "gpt-4o-mini"
+
+
+def _get_nebius_client() -> OpenAI:
+    global _nebius_client
+    if _nebius_client is None:
+        api_key = os.getenv("NEBIUS_API_KEY")
+        if not api_key:
+            raise RuntimeError("NEBIUS_API_KEY not set")
+        _nebius_client = OpenAI(
+            base_url="https://api.tokenfactory.nebius.com/v1/",
+            api_key=api_key,
+        )
+    return _nebius_client
+
+
+def _get_openai_client() -> OpenAI:
+    global _openai_client
+    if _openai_client is None:
         api_key = os.getenv("OPENAI_API_KEY")
         if not api_key:
             raise RuntimeError("OPENAI_API_KEY not set")
-        _client = OpenAI(api_key=api_key)
-    return _client
+        _openai_client = OpenAI(api_key=api_key)
+    return _openai_client
 
+
+def _chat_with_fallback(
+    messages: list,
+    temperature: float = 0.7,
+    max_tokens: int = 150,
+) -> str:
+    """
+    Try Nebius (Gemma 3 27B) first; fall back to OpenAI GPT-4o-mini on any error.
+    Returns the response text.
+    """
+    # --- Primary: Nebius ---
+    try:
+        client = _get_nebius_client()
+        response = client.chat.completions.create(
+            model=NEBIUS_MODEL,
+            messages=messages,
+            temperature=temperature,
+            max_tokens=max_tokens,
+        )
+        logger.debug(f"✅ Nebius response received ({NEBIUS_MODEL})")
+        return response.choices[0].message.content.strip()
+    except Exception as e:
+        logger.warning(f"⚠️ Nebius call failed ({type(e).__name__}: {e}) — falling back to OpenAI")
+
+    # --- Fallback: OpenAI ---
+    try:
+        client = _get_openai_client()
+        response = client.chat.completions.create(
+            model=OPENAI_FALLBACK_MODEL,
+            messages=messages,
+            temperature=temperature,
+            max_tokens=max_tokens,
+        )
+        logger.info(f"✅ OpenAI fallback response received ({OPENAI_FALLBACK_MODEL})")
+        return response.choices[0].message.content.strip()
+    except Exception as e:
+        logger.error(f"❌ OpenAI fallback also failed: {e}", exc_info=True)
+        raise RuntimeError(f"Both Nebius and OpenAI LLM calls failed. Last error: {e}")
+
+
+# =====================================================
+# PUBLIC API
+# =====================================================
 
 def psychological_llm_response(
     user_text: str,
@@ -23,21 +91,13 @@ def psychological_llm_response(
     memory_context: Optional[str] = None,
 ) -> str:
     """
-    Generates a psychologically-aware response with conversation continuity and long-term memory.
-    
-    Args:
-        user_text: Current user input
-        adaptive_state: Trend-based emotional state
-        conversation_context: Minimal context (summary + recent turns)
-        memory_context: Optional long-term memory block (episodic + semantic)
+    Generates a psychologically-aware response with conversation continuity and
+    long-term memory. Uses Nebius (Gemma 3 27B) with OpenAI (GPT-4o-mini) fallback.
     """
-    
-    # Build memory section (if provided)
     memory_section = ""
     if memory_context and memory_context.strip():
         memory_section = f"\n{memory_context}\n"
-    
-    # Build minimal, constant-size prompt
+
     system_prompt = f"""You are a psychologically-aware conversational assistant.
 
 CRITICAL CONSTRAINTS:
@@ -74,73 +134,55 @@ User's emotional state (trend-based, {adaptive_state.get('mode', 'instant')} mod
 
 Respond naturally to continue the conversation. Remember: plain text only, no formatting symbols."""
 
-    client = _get_openai_client()
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_text},
+    ]
 
-    response = client.chat.completions.create(
-        model="gpt-4o-mini",  # Faster model for lower latency
-        messages=[
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_text},
-        ],
-        temperature=0.7,
-        max_tokens=150,  # Limit response length for lower latency
-    )
-
-    return response.choices[0].message.content.strip()
+    return _chat_with_fallback(messages, temperature=0.7, max_tokens=150)
 
 
 def extract_semantic_facts(prompt: str) -> str:
     """
     Lightweight LLM call for semantic memory extraction.
-    Used by memory orchestrator to extract user facts/preferences.
+    Uses Nebius with OpenAI fallback.
     """
-    client = _get_openai_client()
-    
-    response = client.chat.completions.create(
-        model="gpt-4o-mini",
-        messages=[
-            {
-                "role": "system",
-                "content": "You extract stable user facts and preferences from conversations. Return short declarative statements only, one per line."
-            },
-            {"role": "user", "content": prompt}
-        ],
-        temperature=0.3,  # Lower temperature for factual extraction
-        max_tokens=150
-    )
-    
-    return response.choices[0].message.content.strip()
+    messages = [
+        {
+            "role": "system",
+            "content": "You extract stable user facts and preferences from conversations. Return short declarative statements only, one per line.",
+        },
+        {"role": "user", "content": prompt},
+    ]
+    return _chat_with_fallback(messages, temperature=0.3, max_tokens=150)
 
+
+# =====================================================
+# PROMPT HELPERS
+# =====================================================
 
 def _format_recent_context(recent: list) -> str:
-    """Format recent turns concisely (all turns in buffer)"""
     if not recent:
         return "No recent context"
-    
     formatted = []
-    for idx, turn in enumerate(recent, 1):  # All turns in buffer (max 5)
+    for idx, turn in enumerate(recent, 1):
         formatted.append(f"Turn {idx} - User: {turn.get('user_summary', 'N/A')}")
         formatted.append(f"Turn {idx} - You: {turn.get('system_summary', 'N/A')}")
-    
     return "\n".join(formatted)
 
 
 def _format_trends(trends: Dict) -> str:
-    """Format emotional trends for context"""
     if not trends:
         return ""
-    
     parts = []
     if trends.get('stress_trend', 0) > 0.1:
         parts.append("Stress is increasing")
     elif trends.get('stress_trend', 0) < -0.1:
         parts.append("Stress is decreasing")
-    
     if trends.get('valence_trend', 0) > 0.1:
         parts.append("Mood is improving")
     elif trends.get('valence_trend', 0) < -0.1:
         parts.append("Mood is declining")
-    
     return f"Trends: {', '.join(parts)}" if parts else ""
 
 
