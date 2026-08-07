@@ -25,3 +25,8 @@ Thumbs.db
 .pytest_cache/
 .ruff_cache/
 *.log
+
+# Local-only folders (kept on disk, not pushed to GitHub)
+documentation/
+models testing/
+research paper/
