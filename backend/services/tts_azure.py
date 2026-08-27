@@ -429,6 +429,45 @@ class TTSController:
         """Exponential moving average."""
         return self.alpha * new + (1.0 - self.alpha) * old
 
+    # ------------------------------------------------------------------
+    # PERSISTENCE
+    # ------------------------------------------------------------------
+
+    def to_dict(self) -> Dict:
+        """Serialize smoothed state for session persistence."""
+        return {
+            "current_style":      self.current_style,
+            "current_degree":     self.current_degree,
+            "current_rate":       self.current_rate,
+            "current_pitch":      self.current_pitch,
+            "current_volume":     self.current_volume,
+            "current_mode":       self.current_mode,
+            "stress_gate_state":  self.stress_gate.state,
+            "arousal_gate_state": self.arousal_gate.state,
+            "valence_gate_state": self.valence_gate.state,
+            "support_gate_state": self.support_gate.state,
+            "_style_queue":       self._style_queue,
+        }
+
+    @classmethod
+    def from_dict(cls, data: Dict) -> 'TTSController':
+        """Restore smoothed state from persistence."""
+        ctrl = cls()
+        if not data:
+            return ctrl
+        ctrl.current_style      = data.get("current_style", "assistant")
+        ctrl.current_degree     = data.get("current_degree", 1.0)
+        ctrl.current_rate       = data.get("current_rate", 0)
+        ctrl.current_pitch      = data.get("current_pitch", 0)
+        ctrl.current_volume     = data.get("current_volume", "medium")
+        ctrl.current_mode       = data.get("current_mode", "neutral")
+        ctrl.stress_gate.state  = data.get("stress_gate_state", False)
+        ctrl.arousal_gate.state = data.get("arousal_gate_state", False)
+        ctrl.valence_gate.state = data.get("valence_gate_state", False)
+        ctrl.support_gate.state = data.get("support_gate_state", False)
+        ctrl._style_queue       = data.get("_style_queue", [])
+        return ctrl
+
 
 # =====================================================
 # SINGLETON ACCESS

@@ -115,7 +115,7 @@ def get_session(session_id: str) -> Dict:
         return {
             "conversation": ConversationState.from_dict(session_data["conversation"]),
             "emotional_tracker": EmotionalStateTracker.from_dict(session_data["emotional_tracker"]),
-            "tts_controller": TTSController(),
+            "tts_controller": TTSController.from_dict(session_data.get("tts_controller", {})),
         }
     except KeyError:
         logger.info(f"✨ Creating new session: {session_id}")
@@ -129,8 +129,16 @@ def get_session(session_id: str) -> Dict:
             "tts_controller": TTSController(),
         }
     except Exception as e:
-        logger.error(f"❌ Error loading session {session_id}: {e}")
-        return get_session(session_id + "_fallback")
+        logger.error(f"❌ Error loading session {session_id}: {e}. Creating fresh session.")
+        from conversation_state import ConversationState
+        from emotional_trends import EmotionalStateTracker
+        from services.tts_azure import TTSController
+
+        return {
+            "conversation": ConversationState(session_id=session_id),
+            "emotional_tracker": EmotionalStateTracker(),
+            "tts_controller": TTSController(),
+        }
 
 def save_session(session_id: str, session: Dict):
     """Save session state to persistent storage"""
@@ -138,19 +146,20 @@ def save_session(session_id: str, session: Dict):
         persistent_sessions[session_id] = {
             "conversation": session["conversation"].to_dict(),
             "emotional_tracker": session["emotional_tracker"].to_dict(),
+            "tts_controller": session["tts_controller"].to_dict(),
         }
         logger.debug(f"💾 Saved session: {session_id}")
     except Exception as e:
         logger.error(f"❌ Error saving session {session_id}: {e}")
 
-def update_session_metadata(session_id: str, conversation_state: 'ConversationState', transcript: str = ""):
-    """Update or create session metadata for listing/history"""
+async def update_session_metadata(session_id: str, conversation_state: 'ConversationState', transcript: str = ""):
+    """Update or create session metadata for listing/history (async-safe)"""
     import time
     from datetime import datetime
     
     try:
         metadata = session_metadata.get(session_id, {})
-    except:
+    except Exception:
         metadata = {}
     
     if not metadata.get("title") and transcript:
@@ -170,8 +179,8 @@ def update_session_metadata(session_id: str, conversation_state: 'ConversationSt
     
     session_metadata[session_id] = metadata
 
-def delete_session(session_id: str):
-    """Delete a session and its metadata"""
+async def delete_session(session_id: str):
+    """Delete a session and its metadata (async-safe with Modal Dict)"""
     try:
         if session_id in persistent_sessions:
             del persistent_sessions[session_id]
@@ -183,11 +192,22 @@ def delete_session(session_id: str):
         return False
 
 async def list_sessions() -> list:
-    """List all sessions sorted by last updated (uses Modal async Dict interface)"""
+    """List all sessions sorted by last updated.
+    
+    Uses keys() + per-key get() which is more reliable than aio.items()
+    across Modal Dict versions.
+    """
     try:
         sessions = []
-        async for session_id, metadata in session_metadata.aio.items():
-            sessions.append(metadata)
+        keys = await session_metadata.aio.keys()
+        for key in keys:
+            try:
+                metadata = session_metadata.get(key)
+                if metadata:
+                    sessions.append(metadata)
+            except Exception as e:
+                logger.warning(f"⚠️ Skipping session {key}: {e}")
+                continue
         
         sessions.sort(key=lambda x: x.get("last_updated", ""), reverse=True)
         return sessions
@@ -225,6 +245,53 @@ def webm_to_wav(webm_bytes, output_path: str) -> str:
 # MARKDOWN CLEANING (for TTS)
 # =====================================================
 
+def _sanitize_transcript(text: str) -> str:
+    """
+    Clean Whisper transcript before sending to LLM.
+    
+    Handles:
+    - Repeated hallucination patterns (e.g., 'thank you thank you thank you...')
+    - Excessive whitespace and newlines
+    - Unicode anomalies (zero-width chars, replacement chars)
+    - Control characters
+    """
+    import re
+    
+    if not text:
+        return text
+    
+    # Remove zero-width and invisible Unicode characters
+    text = re.sub(r'[\u200b-\u200f\u2028-\u202f\u2060-\u206f\ufeff]', '', text)
+    # Remove replacement characters
+    text = text.replace('\ufffd', '')
+    # Remove control characters (keep newlines and tabs)
+    text = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]', '', text)
+    
+    # Collapse repeated phrases (hallucination detection)
+    # E.g., 'thank you thank you thank you' → 'thank you'
+    words = text.split()
+    if len(words) > 6:
+        # Check for repeating 2-3 word phrases
+        for phrase_len in [2, 3]:
+            if len(words) >= phrase_len * 3:
+                phrase = ' '.join(words[:phrase_len])
+                repeated = phrase + ' ' + phrase + ' ' + phrase
+                if repeated.lower() in text.lower():
+                    # Keep only the first occurrence
+                    text = phrase
+                    break
+    
+    # Collapse excessive whitespace
+    text = re.sub(r'\s+', ' ', text)
+    text = text.strip()
+    
+    # Truncate extremely long transcripts (Whisper hallucination)
+    if len(text) > 500:
+        text = text[:500].rsplit(' ', 1)[0] + '...'
+    
+    return text
+
+
 def _clean_markdown_for_tts(text: str) -> str:
     """
     Remove markdown formatting from text before sending to TTS.
@@ -236,16 +303,54 @@ def _clean_markdown_for_tts(text: str) -> str:
     if not text:
         return text
     
+    # Code blocks (must come before inline code)
+    text = re.sub(r'```[\s\S]*?```', '', text)
+    text = re.sub(r'`([^`]+)`', r'\1', text)
+    
+    # Bold + italic (***text*** or ___text___)
+    text = re.sub(r'\*{3}(.+?)\*{3}', r'\1', text)
+    text = re.sub(r'_{3}(.+?)_{3}', r'\1', text)
+    
+    # Bold (**text** or __text__)
     text = re.sub(r'\*\*(.+?)\*\*', r'\1', text)
     text = re.sub(r'__(.+?)__', r'\1', text)
+    
+    # Italic (*text* or _text_)
     text = re.sub(r'\*(.+?)\*', r'\1', text)
-    text = re.sub(r'_(.+?)_', r'\1', text)
-    text = re.sub(r'^#+\s+', '', text, flags=re.MULTILINE)
-    text = re.sub(r'`([^`]+)`', r'\1', text)
-    text = re.sub(r'```[\s\S]*?```', '', text)
-    text = re.sub(r'\[([^\]]+)\]\([^\)]+\)', r'\1', text)
-    text = re.sub(r'^[\s]*[-*+]\s+', ' ', text, flags=re.MULTILINE)
-    text = re.sub(r'\*{3,}(.+?)\*{3,}', r'\1', text)
+    text = re.sub(r'(?<!\w)_(.+?)_(?!\w)', r'\1', text)
+    
+    # Strikethrough
+    text = re.sub(r'~~(.+?)~~', r'\1', text)
+    
+    # Headings (# Heading)
+    text = re.sub(r'^#{1,6}\s+', '', text, flags=re.MULTILINE)
+    
+    # Links [text](url)
+    text = re.sub(r'\[([^\]]+)\]\([^)]+\)', r'\1', text)
+    
+    # Images ![alt](url)
+    text = re.sub(r'!\[([^\]]*)\]\([^)]+\)', r'\1', text)
+    
+    # Blockquotes
+    text = re.sub(r'^\s*>\s?', '', text, flags=re.MULTILINE)
+    
+    # Horizontal rules (---, ***, ___)
+    text = re.sub(r'^\s*[-*_]{3,}\s*$', '', text, flags=re.MULTILINE)
+    
+    # Tables (| col1 | col2 |)
+    text = re.sub(r'^\|.*\|\s*$', '', text, flags=re.MULTILINE)
+    text = re.sub(r'^\s*\|[-\s|]+\|\s*$', '', text, flags=re.MULTILINE)
+    
+    # Unordered list markers
+    text = re.sub(r'^\s*[-*+]\s+', ' ', text, flags=re.MULTILINE)
+    
+    # Ordered list markers
+    text = re.sub(r'^\s*\d+\.\s+', ' ', text, flags=re.MULTILINE)
+    
+    # HTML tags
+    text = re.sub(r'<[^>]+>', '', text)
+    
+    # Collapse whitespace
     text = re.sub(r'\s+', ' ', text)
     text = text.strip()
     
@@ -306,10 +411,13 @@ class ConversationalAI:
         topic_confidence = 0.0
         memory_context = ""
         
-        session = get_session(session_id)
-        conv_state = session["conversation"]
-        emotional_tracker = session["emotional_tracker"]
-        tts_controller = session["tts_controller"]
+        # Acquire per-session lock to prevent concurrent read-modify-write races
+        lock = get_session_lock(session_id)
+        async with lock:
+            session = get_session(session_id)
+            conv_state = session["conversation"]
+            emotional_tracker = session["emotional_tracker"]
+            tts_controller = session["tts_controller"]
         
         audio_bytes = base64.b64decode(audio_data)
         current_turn = conv_state.dialogue_state.turn_count + 1
@@ -332,6 +440,8 @@ class ConversationalAI:
             if not transcript or len(transcript) < 2:
                 logger.warning(f"⚠️ Empty/invalid transcript, using fallback")
                 transcript = "[User provided empty or very short input]"
+            else:
+                transcript = _sanitize_transcript(transcript)
             
             logger.info(f"📝 Transcript: {transcript}")
             
@@ -545,11 +655,11 @@ class ConversationalAI:
             except Exception as e:
                 logger.error(f"❌ Memory storage failed: {e}", exc_info=True)
             
-            # === SAVE SESSION STATE ===
-            save_session(session_id, session)
-            
-            # === UPDATE SESSION METADATA ===
-            update_session_metadata(session_id, conv_state, transcript)
+            # === SAVE SESSION STATE (locked to prevent concurrent overwrite) ===
+            lock = get_session_lock(session_id)
+            async with lock:
+                save_session(session_id, session)
+                await update_session_metadata(session_id, conv_state, transcript)
             
             # === PREPARE AUDIO ===
             tts_audio_b64 = ""
@@ -807,7 +917,7 @@ class ConversationalAI:
             
             new_session_id = f"session_{uuid.uuid4().hex[:12]}"
             
-            update_session_metadata(
+            await update_session_metadata(
                 new_session_id,
                 ConversationState(session_id=new_session_id),
                 transcript=""
@@ -818,7 +928,7 @@ class ConversationalAI:
         @web_app.delete("/api/sessions/{session_id}")
         async def delete_session_endpoint(session_id: str):
             """Delete a session"""
-            success = delete_session(session_id)
+            success = await delete_session(session_id)
             if success:
                 return {"success": True, "message": f"Session {session_id} deleted"}
             else:
@@ -835,7 +945,7 @@ class ConversationalAI:
         async def readiness_check():
             """Readiness check - Modal restarts if fails"""
             try:
-                memory_available = self.memory_store.is_available()
+                memory_available = self.memory_orchestrator.memory_store.is_available()
                 
                 if memory_available:
                     logger.info("✅ Readiness: Fully ready (with long-term memory)")
@@ -890,7 +1000,7 @@ class ConversationalAI:
                 
                 audio_base64 = data['audio']
                 session_id = data['session_id']
-                voice_name = data.get('voice_name', 'en-US-DragonV2.1Neural')
+                voice_name = data.get('voice_name', 'en-IN-KavyaNeural')
                 
                 if not check_rate_limit(session_id):
                     logger.warning(f"⚠️ Rate limit exceeded for session {session_id}")

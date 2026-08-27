@@ -64,7 +64,7 @@ modal secret create qdrant-credentials \
 ### 3. Deploy
 
 ```bash
-modal deploy realtime_conversational_ai.py
+modal deploy backend/main.py
 ```
 
 First deployment builds all Docker layers and downloads ~2.2 GB of models. This takes ~3–5 minutes. Subsequent code-only redeployments take ~10 seconds.
@@ -104,7 +104,7 @@ curl https://<your-app>.modal.run/readiness
 # → {"status": "ready", "memory": "available"}
 
 # Stream live logs
-modal logs realtime_conversational_ai -f
+modal logs conversational-ai-realtime -f
 ```
 
 ---
@@ -114,7 +114,7 @@ modal logs realtime_conversational_ai -f
 To run with live reloading instead of a fixed deployment:
 
 ```bash
-modal serve realtime_conversational_ai.py
+modal serve backend/main.py
 ```
 
 Modal provides a temporary URL that hot-reloads on file changes.
@@ -125,16 +125,20 @@ Modal provides a temporary URL that hot-reloads on file changes.
 
 ```
 .
-├── realtime_conversational_ai.py   # Main Modal app — WebSocket, API, frontend
-├── services.py                     # ASR, Text Emotion, SER, AST models
-├── fusion.py                       # Psychological state fusion
-├── emotional_trends.py             # Trend tracking, EMA, mode switching
-├── conversation_state.py           # Dialogue state, intent, coherence
-├── memory_manager.py               # Topic detection, retrieval policy
-├── memory_store.py                 # Qdrant vector store (episodic + semantic)
-├── memory_orchestrator.py          # Memory worthiness, storage, extraction
-├── llm_client.py                   # GPT-4o-mini client, prompt construction
-├── tts_azure.py                    # Azure Neural TTS, prosody controller
+├── frontend/
+│   └── index.html                  # Voice UI (HTML/CSS/JS)
+├── backend/
+│   ├── main.py                     # Main Modal app — WebSocket, API
+│   ├── conversation_state.py       # Dialogue state, intent, coherence
+│   ├── emotional_trends.py         # Trend tracking, EMA, mode switching
+│   ├── memory_manager.py           # Topic detection, retrieval policy
+│   ├── memory_store.py             # Qdrant vector store
+│   ├── memory_orchestrator.py      # Memory worthiness, storage, extraction
+│   └── services/
+│       ├── services.py             # Local Whisper ASR, Text Emotion, SER, AST
+│       ├── fusion.py               # Psychological state fusion
+│       ├── llm_client.py           # Nebius primary + OpenAI fallback
+│       └── tts_azure.py            # Azure Neural TTS, prosody controller
 └── documentation.md                # Full technical reference
 ```
 
@@ -153,7 +157,7 @@ Only the first deploy or a dependency change triggers a full rebuild. Code-only 
 
 For all other issues, see the [Troubleshooting section in documentation.md](documentation.md#14-troubleshooting) or check logs:
 ```bash
-modal logs realtime_conversational_ai -f
+modal logs conversational-ai-realtime -f
 ```
 
 ---
@@ -163,11 +167,11 @@ modal logs realtime_conversational_ai -f
 | Layer | Technology |
 |-------|------------|
 | Hosting | Modal (serverless GPU — A10G) |
-| ASR | OpenAI Whisper API |
+| ASR | Local Whisper (`openai-whisper`) |
 | Text Emotion | RoBERTa GoEmotions (HuggingFace) |
 | Speech Emotion | Wav2Vec2 SUPERB (HuggingFace) |
 | Audio Events | AudioSet AST (HuggingFace) |
-| LLM | GPT-4o-mini |
+| LLM | Nebius Gemma 3 27B (OpenAI GPT-4o-mini fallback) |
 | TTS | Azure Neural TTS |
 | Long-term Memory | Qdrant + sentence-transformers |
 | Web Framework | FastAPI + WebSockets |

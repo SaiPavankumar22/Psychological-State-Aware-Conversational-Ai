@@ -208,7 +208,7 @@ class MemoryOrchestrator:
         current_time = time.time()
         last_extraction = self.last_semantic_extraction.get(user_id, 0)
         
-        if current_time - last_extraction < 300:  # Min 5 minutes between extractions
+        if current_time - last_extraction < 60:  # Min 1 minute between extractions
             return []
         
         # Build context from recent turns

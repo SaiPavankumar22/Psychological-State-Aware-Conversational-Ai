@@ -364,6 +364,24 @@
             border: 1px solid #ef4444;
         }
         
+        .success-status {
+            background: rgba(74, 222, 128, 0.2);
+            color: #bbf7d0;
+            padding: 15px;
+            border-radius: 10px;
+            margin: 20px 0;
+            border: 1px solid #4ade80;
+        }
+        
+        .info-status {
+            background: rgba(96, 165, 250, 0.2);
+            color: #bfdbfe;
+            padding: 15px;
+            border-radius: 10px;
+            margin: 20px 0;
+            border: 1px solid #60a5fa;
+        }
+        
         .hidden {
             display: none;
         }
@@ -528,12 +546,11 @@
         <div class="voice-selector">
             <label for="voiceSelect">🎵 Select Voice:</label>
             <select id="voiceSelect">
-                <option value="en-US-DragonV2.1Neural">Dragon V2.1 (Default)</option>
                 <option value="en-US-AvaMultilingualNeural">Ava Multilingual</option>
                 <option value="en-US-AndrewMultilingualNeural">Andrew Multilingual</option>
                 <option value="en-US-EmmaMultilingualNeural">Emma Multilingual</option>
                 <option value="en-US-BrianMultilingualNeural">Brian Multilingual</option>
-                <option value="en-IN-KavyaNeural">Kavya (Indian)</option>
+                <option value="en-IN-KavyaNeural">Kavya (Indian) (Default)</option>
                 <option value="en-IN-AnanyaNeural">Ananya (Indian)</option>
                 <option value="en-IN-AashiNeural">Aashi (Indian)</option>
             </select>
@@ -780,6 +797,10 @@
         let ws;
         let isRecording = false;
         let stream;
+        let lastSentPayload = null;  // For retry after reconnection
+        let wsReconnectAttempts = 0;
+        const WS_MAX_RECONNECT = 5;
+        const WS_BASE_DELAY = 1000; // 1 second
         
         // ===== SESSION PERSISTENCE (localStorage) =====
         function generateSessionId() {
@@ -804,8 +825,8 @@
         const status = document.getElementById('status');
         const startBtn = document.getElementById('startBtn');
         const stopBtn = document.getElementById('stopBtn');
-        const transcript = document.getElementById('transcript');
-        const response = document.getElementById('response');
+        const transcriptEl = document.getElementById('transcript');
+        const responseEl = document.getElementById('response');
         const errorBox = document.getElementById('errorBox');
         const transcriptBox = document.getElementById('transcriptBox');
         const responseBox = document.getElementById('responseBox');
@@ -813,75 +834,135 @@
         const turnCount = document.getElementById('turnCount');
         const modeBadge = document.getElementById('modeBadge');
         
+        // ===== CLIENT-SIDE SESSION LIST =====
+        // We maintain sessions in localStorage so the sidebar always works,
+        // even if the server-side Modal Dict iteration fails.
+        
+        function getLocalSessions() {
+            try {
+                return JSON.parse(localStorage.getItem('chatSessions') || '[]');
+            } catch { return []; }
+        }
+        
+        function saveLocalSessions(sessions) {
+            localStorage.setItem('chatSessions', JSON.stringify(sessions));
+        }
+        
+        function upsertLocalSession(id, title, turns) {
+            const sessions = getLocalSessions();
+            const existing = sessions.find(s => s.session_id === id);
+            if (existing) {
+                if (title) existing.title = title;
+                if (turns !== undefined) existing.turn_count = turns;
+                existing.last_updated = new Date().toISOString();
+            } else {
+                sessions.unshift({
+                    session_id: id,
+                    title: title || 'New Conversation',
+                    turn_count: turns || 0,
+                    created_at: new Date().toISOString(),
+                    last_updated: new Date().toISOString(),
+                });
+            }
+            // Sort by last updated, keep max 50
+            sessions.sort((a, b) => (b.last_updated || '').localeCompare(a.last_updated || ''));
+            saveLocalSessions(sessions.slice(0, 50));
+        }
+        
+        function removeLocalSession(id) {
+            const sessions = getLocalSessions().filter(s => s.session_id !== id);
+            saveLocalSessions(sessions);
+        }
+        
+        // ===== SIDEBAR RENDERING =====
+        
+        function renderSidebar() {
+            const sessions = getLocalSessions();
+            const sessionList = document.getElementById('sessionList');
+            
+            if (sessions.length === 0) {
+                sessionList.innerHTML = `
+                    <div style="opacity: 0.6; font-size: 12px; text-align: center; padding: 20px;">
+                        No conversations yet.<br>Start speaking to begin!
+                    </div>
+                `;
+                return;
+            }
+            
+            sessionList.innerHTML = sessions.map(session => {
+                const isActive = session.session_id === sessionId;
+                const date = new Date(session.last_updated);
+                const timeStr = date.toLocaleString('en-US', { 
+                    month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit'
+                });
+                const title = session.title || 'New Conversation';
+                const turns = session.turn_count || 0;
+                
+                return `
+                    <div class="session-item ${isActive ? 'active' : ''}" 
+                         onclick="switchToSession('${session.session_id}')">
+                        <div class="session-info">
+                            <div class="session-title">${title}</div>
+                            <div class="session-meta">${timeStr} · ${turns} turn${turns !== 1 ? 's' : ''}</div>
+                        </div>
+                        <button class="delete-session-btn" 
+                                onclick="deleteSession(event, '${session.session_id}')">
+                            🗑️
+                        </button>
+                    </div>
+                `;
+            }).join('');
+        }
+        
         // ===== SESSION MANAGEMENT =====
         
         async function loadSessions() {
+            // Always render from localStorage first (instant, no network)
+            renderSidebar();
+            
+            // Then try to sync with server in the background
             try {
                 const response = await fetch('/api/sessions');
-                const data = await response.json();
-                const sessionList = document.getElementById('sessionList');
-                
-                if (data.sessions.length === 0) {
-                    sessionList.innerHTML = `
-                        <div style="opacity: 0.6; font-size: 12px; text-align: center; padding: 20px;">
-                            No sessions yet. Create one!
-                        </div>
-                    `;
-                    return;
+                if (response.ok) {
+                    const data = await response.json();
+                    if (data.sessions && data.sessions.length > 0) {
+                        // Merge server sessions into localStorage
+                        for (const s of data.sessions) {
+                            upsertLocalSession(s.session_id, s.title, s.turn_count);
+                        }
+                        renderSidebar();
+                    }
                 }
-                
-                sessionList.innerHTML = data.sessions.map(session => {
-                    const isActive = session.session_id === sessionId;
-                    const date = new Date(session.last_updated);
-                    const timeStr = date.toLocaleString('en-US', { 
-                        month: 'short', 
-                        day: 'numeric',
-                        hour: '2-digit',
-                        minute: '2-digit'
-                    });
-                    
-                    return `
-                        <div class="session-item ${isActive ? 'active' : ''}" 
-                             onclick="switchToSession('${session.session_id}')">
-                            <div class="session-info">
-                                <div class="session-title">${session.title}</div>
-                                <div class="session-meta">${timeStr} · ${session.turn_count} turns</div>
-                            </div>
-                            <button class="delete-session-btn" 
-                                    onclick="deleteSession(event, '${session.session_id}')">
-                                🗑️
-                            </button>
-                        </div>
-                    `;
-                }).join('');
-            } catch (error) {
-                console.error('Failed to load sessions:', error);
+            } catch (e) {
+                // Server unavailable — localStorage sidebar still works
+                console.warn('Server session sync failed:', e.message);
             }
         }
         
         async function createNewSession() {
             try {
-                const response = await fetch('/api/sessions/new', {
-                    method: 'POST'
-                });
+                const response = await fetch('/api/sessions/new', { method: 'POST' });
                 const data = await response.json();
                 
                 sessionId = data.session_id;
                 localStorage.setItem('currentSessionId', sessionId);
-                console.log('✨ New session created:', sessionId);
+                upsertLocalSession(sessionId, 'New Conversation', 0);
                 
-                transcript.textContent = '';
-                response.textContent = '';
+                transcriptEl.textContent = '';
+                responseEl.textContent = '';
                 transcriptBox.classList.add('hidden');
                 responseBox.classList.add('hidden');
                 stateInfo.classList.add('hidden');
                 
-                await loadSessions();
-                
-                showError('✅ New session created!');
+                renderSidebar();
+                showStatus('✅ New session created!', 'success');
             } catch (error) {
-                console.error('Failed to create session:', error);
-                showError('Failed to create new session');
+                // Even if server fails, create locally
+                sessionId = 'local_' + Date.now();
+                localStorage.setItem('currentSessionId', sessionId);
+                upsertLocalSession(sessionId, 'New Conversation', 0);
+                renderSidebar();
+                showStatus('✅ New session created (offline)', 'success');
             }
         }
         
@@ -890,57 +971,56 @@
             
             sessionId = newSessionId;
             localStorage.setItem('currentSessionId', sessionId);
-            console.log('🔄 Switched to session:', sessionId);
             
-            transcript.textContent = '';
-            response.textContent = '';
+            transcriptEl.textContent = '';
+            responseEl.textContent = '';
             transcriptBox.classList.add('hidden');
             responseBox.classList.add('hidden');
+            stateInfo.classList.add('hidden');
             
-            loadSessions();
-            
-            showError(`✅ Switched to session ${newSessionId.substring(0, 12)}...`);
+            renderSidebar();
+            showStatus(`🔄 Switched to conversation`, 'info');
         }
         
         async function deleteSession(event, sessionIdToDelete) {
             event.stopPropagation();
-            
             if (!confirm('Delete this conversation?')) return;
             
+            // Remove from localStorage immediately
+            removeLocalSession(sessionIdToDelete);
+            
+            // Try server-side delete
             try {
-                const response = await fetch(`/api/sessions/${sessionIdToDelete}`, {
-                    method: 'DELETE'
-                });
-                const data = await response.json();
-                
-                if (data.success) {
-                    console.log('🗑️ Deleted session:', sessionIdToDelete);
-                    
-                    if (sessionIdToDelete === sessionId) {
-                        localStorage.removeItem('currentSessionId');
-                        await createNewSession();
-                    } else {
-                        await loadSessions();
-                    }
-                    
-                    showError('✅ Session deleted');
-                } else {
-                    showError('Failed to delete session');
-                }
-            } catch (error) {
-                console.error('Failed to delete session:', error);
-                showError('Failed to delete session');
+                await fetch(`/api/sessions/${sessionIdToDelete}`, { method: 'DELETE' });
+            } catch (e) { /* server may be down */ }
+            
+            if (sessionIdToDelete === sessionId) {
+                // Deleted the active session — create a new one
+                await createNewSession();
+            } else {
+                renderSidebar();
             }
+            showStatus('✅ Session deleted', 'success');
         }
         
-        loadSessions();
+        renderSidebar();
         
         function showError(message) {
-            errorBox.textContent = '❌ ' + message;
+            errorBox.textContent = message.startsWith('❌') ? message : '❌ ' + message;
+            errorBox.className = 'error';
             errorBox.classList.remove('hidden');
             setTimeout(() => {
                 errorBox.classList.add('hidden');
             }, 5000);
+        }
+        
+        function showStatus(message, type = 'info') {
+            errorBox.textContent = message;
+            errorBox.className = type === 'success' ? 'success-status' : type === 'error' ? 'error' : 'info-status';
+            errorBox.classList.remove('hidden');
+            setTimeout(() => {
+                errorBox.classList.add('hidden');
+            }, 3000);
         }
         
         function updateState(data) {
@@ -1190,18 +1270,17 @@
             }
         }
         
-        async function startRecording() {
-            if (isRecording) return;
-            
-            try {
-                transcriptBox.classList.add('hidden');
-                responseBox.classList.add('hidden');
-                
+        // ===== WEBSOCKET RECONNECTION =====
+        
+        function connectWebSocket() {
+            return new Promise((resolve, reject) => {
                 const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
                 ws = new WebSocket(`${protocol}//${window.location.host}/ws/conversation`);
                 
                 ws.onopen = () => {
                     console.log('✅ WebSocket connected');
+                    wsReconnectAttempts = 0;
+                    resolve(ws);
                 };
                 
                 ws.onmessage = async (event) => {
@@ -1214,20 +1293,26 @@
                             status.textContent = 'Ready to listen';
                             startBtn.disabled = false;
                             stopBtn.disabled = true;
+                            lastSentPayload = null;
                             return;
                         }
                         
                         console.log('📨 Received:', data);
+                        lastSentPayload = null; // Clear retry on success
                         
                         transcriptBox.classList.remove('hidden');
-                        transcript.textContent = data.transcript;
+                        transcriptEl.textContent = data.transcript;
                         
                         responseBox.classList.remove('hidden');
-                        response.textContent = data.llm_reply;
+                        responseEl.textContent = data.llm_reply;
                         
                         updateState(data);
                         updateMemoryView(data);
                         updateModelOutputs(data);
+                        
+                        // Update sidebar with latest session data
+                        upsertLocalSession(sessionId, data.transcript, data.turn_count);
+                        renderSidebar();
                         
                         if (data.tts_audio) {
                             const audioData = atob(data.tts_audio);
@@ -1270,12 +1355,59 @@
                 
                 ws.onerror = (error) => {
                     console.error('WebSocket error:', error);
-                    showError('Connection error');
-                    ring.className = 'assistant-ring';
-                    status.textContent = 'Ready to listen';
-                    startBtn.disabled = false;
-                    stopBtn.disabled = true;
                 };
+                
+                ws.onclose = (event) => {
+                    console.log(`🔌 WebSocket closed (code: ${event.code})`);
+                    // If we had a pending send, attempt reconnection
+                    if (lastSentPayload && wsReconnectAttempts < WS_MAX_RECONNECT) {
+                        const delay = WS_BASE_DELAY * Math.pow(2, wsReconnectAttempts);
+                        wsReconnectAttempts++;
+                        console.log(`🔄 Reconnecting in ${delay}ms (attempt ${wsReconnectAttempts}/${WS_MAX_RECONNECT})`);
+                        status.textContent = `🔄 Reconnecting... (${wsReconnectAttempts}/${WS_MAX_RECONNECT})`;
+                        ring.className = 'assistant-ring processing';
+                        
+                        setTimeout(async () => {
+                            try {
+                                await connectWebSocket();
+                                // Resend the failed message
+                                ws.send(lastSentPayload);
+                                status.textContent = '🤔 Processing...';
+                            } catch (e) {
+                                console.error('Reconnection failed:', e);
+                                showError(`Connection lost. ${wsReconnectAttempts >= WS_MAX_RECONNECT ? 'Max retries reached.' : 'Retrying...'}`);
+                                lastSentPayload = null;
+                                ring.className = 'assistant-ring';
+                                status.textContent = 'Ready to listen';
+                                startBtn.disabled = false;
+                                stopBtn.disabled = true;
+                            }
+                        }, delay);
+                    } else if (!lastSentPayload) {
+                        // Normal close (after audio playback) — reset UI
+                        ring.className = 'assistant-ring';
+                        status.textContent = 'Ready to listen';
+                        startBtn.disabled = false;
+                        stopBtn.disabled = true;
+                    }
+                };
+                
+                // If connection fails to open
+                ws.onerror = () => reject(new Error('WebSocket connection failed'));
+            });
+        }
+        
+        async function startRecording() {
+            if (isRecording) return;
+            
+            try {
+                transcriptBox.classList.add('hidden');
+                responseBox.classList.add('hidden');
+                
+                // Connect (or reuse existing connection)
+                if (!ws || ws.readyState !== WebSocket.OPEN) {
+                    await connectWebSocket();
+                }
                 
                 stream = await navigator.mediaDevices.getUserMedia({ 
                     audio: {
@@ -1316,12 +1448,15 @@
                     );
                     
                     const selectedVoice = document.getElementById('voiceSelect').value;
-                    
-                    ws.send(JSON.stringify({ 
+                    const payload = JSON.stringify({ 
                         audio: base64Audio,
                         session_id: sessionId,
                         voice_name: selectedVoice
-                    }));
+                    });
+                    
+                    // Store for retry on reconnection
+                    lastSentPayload = payload;
+                    ws.send(payload);
                     
                     stream.getTracks().forEach(track => track.stop());
                 };
@@ -1336,7 +1471,7 @@
                 
             } catch (error) {
                 console.error('Error:', error);
-                showError('Microphone access denied');
+                showError('Microphone access denied or connection failed');
                 ring.className = 'assistant-ring';
                 status.textContent = 'Ready to listen';
                 startBtn.disabled = false;
