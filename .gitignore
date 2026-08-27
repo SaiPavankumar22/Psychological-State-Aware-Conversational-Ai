@@ -18,6 +18,7 @@ env/
 .vscode/
 .DS_Store
 Thumbs.db
+.freebuff/
 
 # Caches / build
 *.egg-info/

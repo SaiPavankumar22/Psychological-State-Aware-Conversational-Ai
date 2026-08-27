@@ -40,14 +40,18 @@ Complete technical reference for the system architecture, components, configurat
 This system is a **research-grade, real-time conversational AI** that:
 
 - Transcribes user speech (OpenAI Whisper)
-- Detects emotions from text (RoBERTa), voice (Wav2Vec2), and audio events (AudioSet AST)
+- Detects emotions from **28 text emotions** (RoBERTa), voice (Wav2Vec2), and audio events (AudioSet AST)
+- Sanitizes Whisper transcripts (repetition collapse, Unicode cleanup)
 - Extracts acoustic features dynamically from each audio clip
 - Fuses signals into a 4-dimensional psychological state (Valence, Arousal, Stress, Clarity)
 - Tracks emotional **trajectories** over time — not just instant values
-- Stores and retrieves long-term memories via Qdrant vector database
-- Generates a psychologically adaptive LLM response (GPT-4o-mini)
-- Synthesizes speech with an emotionally adaptive voice (Azure Neural TTS)
-- Maintains full session history (ChatGPT-like sidebar)
+- Stores and retrieves long-term memories via Qdrant vector database with auto-reconnect
+- Generates a psychologically adaptive LLM response (GPT-4o-mini, streaming)
+- Synthesizes speech with an emotionally adaptive voice (Azure Neural TTS) with per-voice style validation
+- Falls back to browser SpeechSynthesis when Azure TTS fails
+- Streams responses in 3 steps: thinking → text → audio (cuts perceived latency by 2-4s)
+- Maintains full session history (ChatGPT-like sidebar with search, export)
+- Features a premium glassmorphism UI with emotion sparklines and keyboard shortcuts
 
 The key innovation is **trend-based adaptation**: the system responds to where emotions are heading, not just where they are right now.
 
@@ -132,12 +136,12 @@ Houses three services loaded once at container startup.
 **Text Emotion Classification:**
 - Model: `SamLowe/roberta-base-go_emotions` (HuggingFace Transformers)
 - Device: CUDA → CPU fallback
-- Returns: 20 emotion labels with probabilities
+- Returns: **28 emotion labels** with probabilities (all emotions from the GoEmotions taxonomy)
 
 | Category | Emotions |
 |----------|----------|
-| Positive | joy, optimism, love, gratitude, relief |
-| Negative | sadness, grief, fear, anger, nervousness, disgust, remorse, disappointment, embarrassment |
+| Positive | joy, optimism, love, gratitude, relief, excitement, pride, amusement, admiration, approval |
+| Negative | sadness, grief, fear, anger, nervousness, disgust, remorse, disappointment, embarrassment, annoyance, disapproval |
 | Cognitive | confusion, realization, surprise |
 | Social | curiosity, caring, desire |
 | Neutral | neutral |
@@ -180,8 +184,8 @@ Combines multimodal signals into a single psychological state.
 #### Four Dimensions
 
 **Valence** `[-1, 1]` — emotional positivity
-- Positive: joy, love, gratitude, laughter, cheering
-- Negative: sadness, anger, fear, crying, grief
+- Positive: joy, love, gratitude, excitement, pride, amusement, admiration, laughter, cheering
+- Negative: sadness, anger, fear, annoyance, disapproval, crying, grief
 
 **Arousal** `[0, 1]` — energy / activation
 - High: screaming, excitement, fear, shouting
@@ -193,8 +197,12 @@ clarity = 0.4 × semantic  +  0.3 × acoustic  +  0.3 × fluency
 
 where:
   semantic  = 1 - confusion_score
-  acoustic  = proximity of speech_rate to baseline (4.0 WPS)
+  acoustic  = (rate_dev / 3.0)^1.5   (soft curve, not harsh linear)
   fluency   = 1 / (1 + pause_duration)
+
+Note: rate_dev = abs(speech_rate - 4.0) / 3.0
+  6 WPS → ~0.5 clarity (was 0.0 with old linear formula)
+  Normal speech (2-6 WPS) stays high clarity
 ```
 
 **Stress** `[0, 1]` — psychological stress
@@ -231,6 +239,11 @@ derivative_max         = 0.8    # Maximum trend magnitude (clamp)
 stability_threshold    = 0.12   # Variance below this = "stable"
 min_samples_for_trend  = 2      # Minimum buffer entries before trends
 ```
+
+**Mode Switching Hysteresis:**
+- `instant` mode: confidence < 0.3
+- `trend` mode: confidence > 0.6
+- Minimum dwell time: 2.0s (was 1.5s — prevents flip-flopping)
 
 #### `BoundedEmotionalDimension`
 
@@ -435,8 +448,9 @@ where:
 
 #### Graceful Degradation
 
-- Connection failure → `_fallback = True`, all methods return safe defaults
-- 60-second cooldown before next retry attempt
+- Connection failure → auto-reconnect via `_reconnect()` first
+- If reconnect succeeds → immediate recovery, no fallback needed
+- If reconnect fails → `_fallback = True`, 60-second cooldown before next retry
 - Tenacity retry: 3 attempts, exponential backoff (2–10s)
 - Error logging unwraps `RetryError` to reveal root cause
 
@@ -446,12 +460,13 @@ where:
 |--------|-------------|
 | `store_episodic_memory()` | Store a conversation episode |
 | `store_semantic_memory()` | Store a user fact/preference |
-| `retrieve_episodic_memories()` | Semantic search + composite re-rank |
-| `retrieve_semantic_memories()` | Semantic search + composite re-rank |
+| `retrieve_episodic_memories()` | Semantic search + composite re-rank (min_importance: 0.35) |
+| `retrieve_semantic_memories()` | Semantic search + composite re-rank (min_importance: 0.35) |
 | `find_similar_memory()` | Find existing memory above similarity threshold |
 | `reinforce_memory()` | Increment reinforcement_count, boost importance |
 | `get_memory_stats()` | Per-user counts for both collections |
-| `is_available()` | Connectivity check |
+| `is_available()` | Connectivity check with auto-reconnect |
+| `_reconnect()` | Tear down dead client, re-initialize fresh |
 
 ---
 
@@ -483,7 +498,9 @@ Store only if importance > 0.6
 - `emotional_intensity`: magnitude of current emotional state
 - `topic_shift_strength`: confidence of detected topic change
 - `user_self_reference`: presence of "I", "my", "me", "myself" etc.
-- `novelty_score`: based on message length / complexity
+- `novelty_score`: combined length score (60%) + word diversity score (40%) — not just word count
+
+**Importance Threshold:** `0.45` (lowered from 0.6 — moderate emotional content or self-disclosure alone can now trigger storage)
 
 #### `store_episodic_memory_with_reinforcement()`
 
@@ -494,6 +511,8 @@ Store only if importance > 0.6
 #### `extract_semantic_memories()`
 
 Every 5 turns, calls a lightweight LLM prompt to extract stable user facts from recent conversation turns, stores each fact as a separate semantic memory entry.
+
+**Cooldown:** 60 seconds wall-clock (reduced from 300s — extraction now fires reliably in normal-paced conversations).
 
 Uses `extract_semantic_facts()` from `llm_client.py`.
 
@@ -521,7 +540,15 @@ Formats retrieved memories into a text block injected before the LLM system prom
 5. Current emotional state with trend descriptions
 6. Trend direction guidance ("Stress is increasing", "Mood is declining", etc.)
 
-**Parameters:** `temperature=0.7`, `max_tokens=150`
+**Parameters:** `temperature=0.7`, `max_tokens=500`
+
+**Transcript Sanitization:**
+Before reaching the LLM, Whisper transcripts are cleaned by `_sanitize_transcript()`:
+- Strips invisible Unicode (zero-width spaces, replacement characters)
+- Removes control characters
+- Collapses repeating phrases (2-3 word phrases repeated 3+ times)
+- Collapses excessive whitespace
+- Truncates transcripts over 500 chars
 
 #### `extract_semantic_facts()`
 
@@ -571,20 +598,37 @@ Style history requires **2 consecutive suggestions** before switching (prevents 
 | `pitch` | -15% to +15% | Higher for arousal, lower for declining valence |
 | `volume` | soft / medium | Soft if stressed or stress rising |
 
-All parameters are exponentially smoothed (`α = 0.6`).
+All parameters are exponentially smoothed (`α = 0.75`, increased from 0.6 for more responsive adaptation).
+
+**Per-Voice Style Validation:**
+- Each voice has a mapped set of supported styles
+- If a selected style isn't supported by the voice, it falls back through a priority chain
+- Example: `calm` → `empathetic` → `assistant` → `friendly`
+- Prevents Azure silently ignoring unsupported styles
+
+**Widened Prosody Bounds:**
+- Rate: -40% to +35% (was -30% to +25%)
+- Pitch: -25% to +25% (was -15% to +15%)
+- Style degree floor: 0.3 (was 0.5)
+- JND thresholds lowered: rate 2%, pitch 1%, degree 0.05
+- Hysteresis dwell times reduced: 2-2.5s (was 4-5s)
+
+**State Persistence:**
+- `to_dict()` / `from_dict()` serialize all smoothed prosody state
+- Session restore preserves continuous voice adaptation
+- Prevents jarring voice resets mid-conversation
 
 **Available Voices:**
 
 | Voice | Description |
 |-------|-------------|
-| `en-US-DragonV2.1Neural` | Default — deep, natural |
+| `en-IN-KavyaNeural` | Default — Indian female, expressive |
+| `en-IN-AnanyaNeural` | Indian female, expressive |
+| `en-IN-AashiNeural` | Indian female, calm |
 | `en-US-AvaMultilingualNeural` | Female, expressive |
 | `en-US-AndrewMultilingualNeural` | Male, warm |
 | `en-US-EmmaMultilingualNeural` | Female, clear |
 | `en-US-BrianMultilingualNeural` | Male, friendly |
-| `en-IN-KavyaNeural` | Indian female |
-| `en-IN-AnanyaNeural` | Indian female, expressive |
-| `en-IN-AashiNeural` | Indian female, calm |
 
 **SSML Output:**
 ```xml
@@ -614,26 +658,39 @@ scaledown     = 600s (10 minutes idle)
 secrets       = ["emotion-env", "qdrant-credentials"]
 ```
 
-#### Docker Image Layers (5-layer caching strategy)
+#### Docker Image Layers (6-layer caching strategy)
 
 ```
-Layer 1  System packages (ffmpeg, sox, build-essential)    ~rarely changes
-Layer 2  PyTorch 2.6.0 + CUDA 12.1                        ~rarely changes
-Layer 3  ML packages (transformers, librosa, azure-cognitiveservices-speech …)
-Layer 4  Python utilities (fastapi, uvicorn, openai …)
-Layer 5  Local source files                                ~changes most often
+Layer 1    System packages (ffmpeg, sox, build-essential)    ~rarely changes
+Layer 2    PyTorch 2.6.0 + CUDA 12.1                        ~rarely changes
+Layer 3    ML packages (transformers, librosa, azure-cognitiveservices-speech …)
+Layer 4    Python utilities (fastapi, uvicorn, openai …)
+Layer 4.5  Pre-downloaded ML models (Whisper, RoBERTa, AST, SER, SentenceTransformer)
+Layer 5    Local source files (backend + frontend)           ~changes most often
 ```
 
 Code-only changes rebuild only Layer 5 (~8–10s vs 45–60s for full rebuild).
 
+**Model Pre-downloading:** All 6 ML models are pre-downloaded during image build and cached in `HF_HOME`/`TRANSFORMERS_CACHE` directories. Cold start drops from ~30-60s to ~5-10s.
+
+**Frontend Serving:** CSS and JS files are read into memory at startup and embedded inline in the HTML response. This eliminates Modal container filesystem issues.
+
 #### Persistent Storage
 
 ```python
-modal.Dict.from_name("conversation-sessions")  # session state
+modal.Dict.from_name("conversation-sessions")  # session state + TTS controller state
 modal.Dict.from_name("session-metadata")        # session list/metadata
 ```
 
-Stores per session: `ConversationState`, `EmotionalStateTracker`, `turn_history`.
+Stores per session: `ConversationState`, `EmotionalStateTracker`, `TTSController` (serialized), `turn_history`.
+
+#### Modal Async Usage
+
+Session metadata uses Modal's async interfaces to avoid `AsyncUsageWarning`:
+```python
+await session_metadata.put.aio(session_id, metadata)    # not sync assignment
+await session_metadata.delete.aio(session_id)            # not sync deletion
+```
 
 ---
 
@@ -673,9 +730,20 @@ Stores per session: `ConversationState`, `EmotionalStateTracker`, `turn_history`
     memory_orchestrator.detect_memory_worthiness(...)
     → IF worthy: store_episodic_memory_with_reinforcement()
     → IF turn % 5 == 0: extract_semantic_memories()
-17. conv_state.add_turn(user_utterance, llm_reply, ...)
-18. save_session(session_id, session)   → Modal Dict
-19. Return JSON payload over WebSocket
+17. BACKGROUND (fire-and-forget via asyncio.create_task):
+    → save_session(session_id, session)   → Modal Dict (non-blocking)
+18. Return JSON payload over WebSocket
+
+**Streaming Pipeline (3-step):**
+The WebSocket now sends 4 messages per turn:
+1. `{"status": "thinking"}` — immediately when processing starts
+2. `{"status": "transcript", ...}` — after ASR completes
+3. `{"status": "response_text", ...}` — after LLM (text shown immediately)
+4. `{"status": "audio_ready", ...}` — after TTS (audio played concurrently)
+
+**Parallel Execution:**
+- TTS synthesis + memory storage run concurrently via `asyncio.gather()`
+- Session save is fire-and-forget after response is sent
 ```
 
 ---
@@ -694,47 +762,49 @@ Stores per session: `ConversationState`, `EmotionalStateTracker`, `turn_history`
 ```
 
 **Server → Client (success):**
+
+The WebSocket now sends **4 messages** per turn in sequence:
+
+**Message 1 — Thinking:**
+```json
+{ "status": "thinking" }
+```
+
+**Message 2 — Transcript:**
 ```json
 {
-  "transcript":     "I've been feeling overwhelmed lately.",
-  "llm_reply":      "That sounds really difficult...",
-  "tts_audio":      "<base64-encoded WAV>",
-  "turn_count":     4,
-  "emotional_mode": "trend",
-  "instant_state":  { "valence": -0.42, "arousal": 0.55, "stress": 0.78, "clarity": 0.61 },
-  "adaptive_state": {
-    "valence": -0.38, "arousal": 0.51, "stress": 0.71, "clarity": 0.64,
-    "mode": "trend", "confidence": 0.82,
-    "trends": { "valence_trend": -0.08, "stress_trend": 0.21, "..." : "..." }
-  },
-  "tts_params":     { "style": "empathetic", "styledegree": 1.45, "rate": "-18%", "pitch": "-6%", "volume": "soft" },
-  "model_outputs": {
-    "asr":            { "transcript": "...", "latency_ms": 620 },
-    "text_emotion":   { "sadness": 0.42, "nervousness": 0.28, "..." : 0.0 },
-    "audio_analysis": {
-      "ser": { "sad": 0.61, "neutral": 0.28, "angry": 0.08, "happy": 0.03 },
-      "ast": { "speech": 0.88, "crying": 0.12, "..." : 0.0 }
-    },
-    "acoustic_features": {
-      "speech_rate": 2.8, "pause_duration": 0.62, "jitter": 0.07,
-      "word_count": 7, "audio_duration": 2.5
-    },
-    "fusion": { "valence": -0.42, "arousal": 0.55, "stress": 0.78, "clarity": 0.61 }
-  },
-  "memory_view": {
-    "session_id": "session_abc123",
-    "dialogue_state": { "primary_topic": "personal", "turn_count": 4, "coherence_score": 0.82 },
-    "recent_turns": [ { "user": "...", "ai": "...", "topic": "personal" } ],
-    "emotional_trends": { "mode": "trend", "confidence": 0.82, "..." : "..." },
-    "topic_info": { "topic": "personal", "confidence": 0.85 },
-    "long_term_memory": { "stats": { "episodic_count": 3, "semantic_count": 1, "total": 4 }, "last_retrieval": "emotional_shift" }
-  },
-  "turn_history": [
-    { "turn": 1, "mode": "instant", "confidence": 0.12, "valence": -0.10, "arousal": 0.40,
-      "stress": 0.35, "clarity": 0.75, "trends": { "valence_trend": 0.02, "stress_trend": 0.01, "..." : 0.0 } }
-  ]
+  "status": "transcript",
+  "transcript": "I've been feeling overwhelmed lately.",
+  "model_outputs": { ... },
+  "adaptive_state": { ... },
+  "turn_count": 4
 }
 ```
+
+**Message 3 — Response Text:**
+```json
+{
+  "status": "response_text",
+  "llm_reply": "That sounds really difficult...",
+  "tts_params": { "style": "empathetic", ... },
+  "memory_view": { ... },
+  "turn_history": [ ... ]
+}
+```
+
+**Message 4 — Audio Ready:**
+```json
+{
+  "status": "audio_ready",
+  "tts_audio": "<base64-encoded WAV>"
+}
+```
+
+**Frontend Behavior:**
+- Text is streamed word-by-word as Message 3 arrives
+- Audio plays concurrently (doesn't wait for text to finish)
+- If Azure TTS fails, browser SpeechSynthesis fallback is used
+- Markdown asterisks are stripped from displayed text
 
 **Error close codes:**
 - `1008` — client error (malformed JSON, missing fields, rate limited)
@@ -962,26 +1032,45 @@ All five values are fed into `fusion.fuse()` and displayed in the frontend.
 
 Single-page application served by FastAPI, communicating via WebSocket.
 
+### File Structure
+
+```
+frontend/
+├── index.html    (~250 lines)  Clean HTML structure
+├── styles.css    (~540 lines)  CSS with custom properties (glassmorphism)
+└── app.js        (~750 lines)  All JavaScript logic
+```
+
+CSS and JS are embedded inline in the HTML response at startup for reliability.
+
 ### Layout
 
 ```
 ┌───────────────────────────────────────────────────────────────┐
-│  Sidebar                  │  Main Content                     │
-│  • New Chat button        │  • Voice selector                 │
-│  • Session list           │  • Mic ring (recording state)     │
-│    - title                │  • Start / Stop buttons           │
-│    - turn count           │  • Turn counter + mode badge      │
-│    - last updated         │  • Transcript display             │
-│    - delete button        │  • Response display               │
-│                           │  • 4-dimension state bars         │
-│                           │                                   │
-│                           │  Debug Panels (2-col grid)        │
-│                           │  Left: Model Outputs              │
-│                           │  Right: Memory & State            │
-│                           │                                   │
-│                           │  Turn-wise Psychological Log      │
+│  Sidebar (260px)            │  Main Content (flex: 1)         │
+│  • Brand: MindVoice         │  • Title: MindVoice (gradient)  │
+│  • New Chat button          │  • Voice selector (pill)        │
+│  • Search bar               │  • Turn counter + mode badge    │
+│  • Session list             │  • Mic ring (animated states)   │
+│    - active indicator (█)   │    - 9-bar waveform during rec  │
+│    - delete on hover        │  • Start / Stop buttons (pill)  │
+│    - turn count + timestamp │  • Thinking indicator (amber)   │
+│  • Footer: Export + Debug   │  • Transcript card (user)       │
+│                             │  • Response card (AI, streaming)│
+│                             │  • Emotion circles (4 SVG rings)│
+│                             │  • Sparkline (valence/stress)   │
+│                             │  • Debug Panels (2-col, collaps)│
+│                             │  Left: Model Outputs             │
+│                             │  Right: Memory & State           │
 └───────────────────────────────────────────────────────────────┘
 ```
+
+### Keyboard Shortcuts
+
+| Key | Action |
+|-----|--------|
+| Space | Start / stop recording |
+| Escape | Cancel recording |
 
 ### Model Outputs Panel (left debug panel)
 
@@ -1090,7 +1179,7 @@ QDRANT_PORT    = 6333
 
 ### Cost efficiency
 
-- `gpt-4o-mini` (cheapest capable model, max 150 output tokens)
+- `gpt-4o-mini` (cheapest capable model, max 500 output tokens)
 - Memory retrieval rate-limited (max once per 30s)
 - Long-term memory storage gated by importance score (> 0.6)
 - Modal GPU autoscaling: scaledown after 10 minutes idle
@@ -1108,20 +1197,30 @@ QDRANT_PORT    = 6333
 
 **Symptom in logs:**
 ```
-❌ Qdrant init failed (RetryError). Root cause: AttributeError: ...
+❌ Qdrant init failed (RetryError). Root cause: ResponseHandlingException: [Errno 104] Connection reset by peer
 ```
 
 **Checklist:**
 1. Is `QDRANT_URL` set to the full HTTPS cloud URL?
 2. Is `QDRANT_API_KEY` correct? (Check Qdrant Cloud dashboard)
-3. For cloud URLs, is `QDRANT_PORT` absent from secrets? (Do not set it for cloud)
+3. For cloud URLs, is `QDRANT_PORT` absent from secrets? (The system auto-strips `:6333` from HTTPS URLs)
 4. Can Modal's outbound network reach Qdrant? (Check firewall/VPN)
 
-**Expected fallback:** System continues in degraded mode (short-term memory only). No crash.
+**Expected fallback:** System continues in degraded mode (short-term memory only). No crash. Auto-reconnect will attempt recovery on next operation.
 
 ```bash
 modal logs realtime_conversational_ai -f | grep -E "Qdrant|memory"
 ```
+
+### Response truncated mid-sentence
+
+**Cause:** `max_tokens` too low (was 150, now 500)
+**Fix:** Ensure `max_tokens=500` in `llm_client.py` `psychological_llm_response()`
+
+### CSS/JS not loading in frontend
+
+**Cause:** Modal container not serving `/static/` route reliably
+**Fix:** CSS and JS are now embedded inline in the HTML response at startup. If still broken, ensure `styles.css` and `app.js` exist in the `frontend/` directory.
 
 ---
 
@@ -1204,7 +1303,7 @@ self.weights = {
 
 Edit `memory_orchestrator.py`:
 ```python
-IMPORTANCE_THRESHOLD = 0.6   # Lower = store more, higher = store less
+IMPORTANCE_THRESHOLD = 0.45   # Lower = store more, higher = store less
 ```
 
 ### Change retrieval rate limit
@@ -1256,7 +1355,7 @@ MemoryRetrievalPolicy(
 
 | File | Lines | Responsibility |
 |------|-------|----------------|
-| `realtime_conversational_ai.py` | ~2450 | Modal app, WebSocket, FastAPI, frontend HTML/CSS/JS, pipeline orchestration |
+| `realtime_conversational_ai.py` | ~1600 | Modal app, WebSocket, FastAPI, pipeline orchestration, streaming pipeline |
 | `services.py` | ~200 | ASR, Text Emotion, SER, AST, acoustic feature extraction |
 | `fusion.py` | ~350 | Multimodal fusion, psychological state computation |
 | `emotional_trends.py` | ~520 | Trend tracking, circular buffers, EMA, confidence, mode switching |
@@ -1265,8 +1364,11 @@ MemoryRetrievalPolicy(
 | `memory_store.py` | ~705 | Qdrant client, collections, embeddings, retrieval, reinforcement |
 | `memory_orchestrator.py` | ~405 | Memory worthiness, storage decisions, semantic extraction |
 | `llm_client.py` | ~140 | GPT-4o-mini client, prompt construction, semantic fact extraction |
-| `tts_azure.py` | ~445 | Azure Neural TTS, prosody control, voice style selection |
+| `tts_azure.py` | ~445 | Azure Neural TTS, prosody control, voice style selection, state persistence |
+| `frontend/index.html` | ~250 | Clean HTML structure (CSS/JS embedded at startup) |
+| `frontend/styles.css` | ~540 | Premium glassmorphism UI with CSS custom properties |
+| `frontend/app.js` | ~750 | WebSocket streaming, session management, UI interactions |
 
 ---
 
-*Documentation last updated: April 2026*
+*Documentation last updated: August 2026*
