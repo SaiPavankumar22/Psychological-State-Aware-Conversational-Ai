@@ -93,21 +93,25 @@ class MemoryOrchestrator:
         user_self_reference = min(1.0, self_ref_count / 5.0)
         
         # 4. Novelty Score (0-1)
-        # Heuristic: longer messages = more information
-        # Normalize by typical length (50 words)
-        word_count = len(user_text.split())
-        novelty_score = min(1.0, word_count / 50.0)
+        # Heuristic: word count + unique content indicators
+        words = user_text.split()
+        word_count = len(words)
+        unique_words = len(set(w.lower() for w in words))
+        # Longer messages with more unique words = more information
+        length_score = min(1.0, word_count / 40.0)
+        diversity_score = unique_words / max(word_count, 1)
+        novelty_score = 0.6 * length_score + 0.4 * diversity_score
         
         # Calculate importance
         importance = (
-            0.3 * emotional_intensity +
-            0.3 * topic_shift_strength +
-            0.2 * user_self_reference +
-            0.2 * novelty_score
+            0.30 * emotional_intensity +
+            0.30 * topic_shift_strength +
+            0.20 * user_self_reference +
+            0.20 * novelty_score
         )
         
-        # Decision threshold
-        should_store = importance > 0.6
+        # Decision threshold (lowered from 0.6 to 0.45 so more memories are stored)
+        should_store = importance > 0.45
         
         # Reason
         if should_store:
@@ -304,12 +308,12 @@ Extract 1-3 key facts about the user (preferences, behaviors, goals):"""
                 "semantic": [...]
             }
         """
-        # Retrieve top 3 episodic
+        # Retrieve top 3 episodic (lowered threshold to match storage)
         episodic = self.memory_store.retrieve_episodic_memories(
             user_id=user_id,
             query=current_query,
             limit=3,
-            min_importance=0.6
+            min_importance=0.4
         )
         
         # Retrieve top 3 semantic

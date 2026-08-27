@@ -149,11 +149,19 @@ class PsychologicalFusion:
         Clarity = f(semantic confusion, speech rate deviation, fluency).
         
         Returns [0, 1] — 1 = crystal clear, 0 = highly confused/disrupted.
+        
+        Rate deviation uses a softer sigmoid-like curve:
+        - 2-6 WPS = high clarity (normal speech range)
+        - <1 or >8 WPS = low clarity (very slow or very fast)
         """
-        semantic   = 1.0 - clamp(confusion_prob, 0.0, 1.0)
-        rate_dev   = abs(speech_rate - self.baseline_rate) / 2.0
-        acoustic   = clamp(1.0 - rate_dev, 0.0, 1.0)
-        fluency    = clamp(1.0 - pause_duration / self.max_pause, 0.0, 1.0)
+        semantic = 1.0 - clamp(confusion_prob, 0.0, 1.0)
+        
+        # Softer rate penalty: allow 2-6 WPS as normal range
+        rate_dev = abs(speech_rate - self.baseline_rate)
+        # Gaussian-like decay: 0 deviation = 1.0, 3+ deviation = ~0.3
+        acoustic = clamp(1.0 - (rate_dev / 3.0) ** 1.5, 0.0, 1.0)
+        
+        fluency = clamp(1.0 - pause_duration / self.max_pause, 0.0, 1.0)
         return clamp(0.40 * semantic + 0.30 * acoustic + 0.30 * fluency, 0.0, 1.0)
 
     def compute_stress(

@@ -41,7 +41,13 @@ app = modal.App("conversational-ai-realtime")
 # Layer 1: Base system packages (rarely changes)
 image = modal.Image.debian_slim(python_version="3.11").apt_install(
     "git", "ffmpeg", "sox"
-)
+).env({
+    # Cache HuggingFace models in image layers (persists across rebuilds)
+    "HF_HOME": "/root/.cache/huggingface",
+    "TRANSFORMERS_CACHE": "/root/.cache/huggingface",
+    # Cache Whisper models
+    "XDG_CACHE_HOME": "/root/.cache",
+})
 
 # Layer 2: Core dependencies (infrequently changes)
 image = image.pip_install(
@@ -70,6 +76,18 @@ image = image.pip_install(
     "librosa",
     "soundfile",
     "qdrant-client",
+)
+
+# Layer 4.5: Pre-download all ML models during image build
+# This bakes models into the Docker layer so cold starts are fast.
+image = image.run_commands(
+    # Pre-download Whisper (small) — downloads from OpenAI CDN
+    "python -c \"import whisper; whisper.load_model('small')\"",
+    # Pre-download HuggingFace models — caches in HF_HOME
+    "python -c \"from transformers import AutoTokenizer, AutoModelForSequenceClassification; AutoTokenizer.from_pretrained('SamLowe/roberta-base-go_emotions'); AutoModelForSequenceClassification.from_pretrained('SamLowe/roberta-base-go_emotions')\"",
+    "python -c \"from transformers import AutoFeatureExtractor, AutoModelForAudioClassification; AutoFeatureExtractor.from_pretrained('MIT/ast-finetuned-audioset-10-10-0.4593'); AutoModelForAudioClassification.from_pretrained('MIT/ast-finetuned-audioset-10-10-0.4593')\"",
+    "python -c \"from transformers import Wav2Vec2FeatureExtractor, Wav2Vec2ForSequenceClassification; Wav2Vec2FeatureExtractor.from_pretrained('superb/wav2vec2-large-superb-er'); Wav2Vec2ForSequenceClassification.from_pretrained('superb/wav2vec2-large-superb-er')\"",
+    "python -c \"from sentence_transformers import SentenceTransformer; SentenceTransformer('all-MiniLM-L6-v2')\"",
 )
 
 # Layer 5: Local files (changes frequently - should be last!)
@@ -390,6 +408,15 @@ class ConversationalAI:
         self.memory_mgr = MemoryManager()
         self.memory_orchestrator = MemoryOrchestrator()
         
+        # Eagerly initialize SentenceTransformer so first request isn't slow
+        # Wrapped in try/except — if Qdrant is unreachable at startup,
+        # the lazy client property will retry on first actual use.
+        logger.info("🧠 Pre-loading SentenceTransformer for memory embeddings...")
+        try:
+            self.memory_orchestrator.memory_store._ensure_initialized()
+        except Exception as e:
+            logger.warning(f"⚠️ Memory store init deferred (will retry on first use): {e}")
+        
         logger.info("✅ All models loaded successfully")
         logger.info("🧠 Memory orchestrator initialized")
     
@@ -554,7 +581,7 @@ class ConversationalAI:
             logger.info(f"💬 Response: {llm_reply[:100]}...")
             
             # === COMPUTE TTS PARAMS ===
-            tts_params = tts_controller.compute(adaptive_state)
+            tts_params = tts_controller.compute(adaptive_state, response_text=llm_reply, voice_name=voice_name)
             logger.debug(f"🎵 TTS: style={tts_params['style']}, degree={tts_params['styledegree']}, "
                   f"rate={tts_params['rate']}, pitch={tts_params['pitch']}")
 
@@ -922,55 +949,50 @@ class ConversationalAI:
         
         llm_reply_for_tts = _clean_markdown_for_tts(llm_reply)
         
-        # TTS
-        tts_params = tts_controller.compute(adaptive_state)
-        tts_audio_bytes = None
-        try:
-            tts_audio_path = await asyncio.to_thread(
-                synthesize_azure_tts, llm_reply_for_tts, tts_params, "/tmp", voice_name
-            )
-            if os.path.exists(tts_audio_path) and os.path.getsize(tts_audio_path) >= 100:
-                with open(tts_audio_path, "rb") as f:
-                    tts_audio_bytes = f.read()
-                os.unlink(tts_audio_path)
-        except Exception as e:
-            logger.error(f"❌ TTS synthesis failed: {e}")
-            tts_audio_bytes = None
+        # === TTS + MEMORY STORAGE in parallel ===
+        tts_params = tts_controller.compute(adaptive_state, response_text=llm_reply, voice_name=voice_name)
         
-        # Update conversation state
-        conv_state.add_turn(transcript, llm_reply, instant_psychological_state, topic=conv_state.dialogue_state.primary_topic)
+        async def _synthesize_tts():
+            try:
+                tts_audio_path = await asyncio.to_thread(
+                    synthesize_azure_tts, llm_reply_for_tts, tts_params, "/tmp", voice_name
+                )
+                if os.path.exists(tts_audio_path) and os.path.getsize(tts_audio_path) >= 100:
+                    with open(tts_audio_path, "rb") as f:
+                        return f.read()
+                    os.unlink(tts_audio_path)
+            except Exception as e:
+                logger.error(f"❌ TTS synthesis failed: {e}")
+            return None
         
-        # Memory storage
-        try:
-            previous_topic = conv_state.dialogue_state.primary_topic if current_turn > 1 else None
-            memory_decision = self.memory_orchestrator.detect_memory_worthiness(
-                user_text=transcript, system_response=llm_reply,
-                emotional_state=instant_psychological_state,
-                topic=conv_state.dialogue_state.primary_topic,
-                topic_confidence=asr_result.get("llm_context", {}).get("dialogue_state", {}).get("topic_confidence", 0),
-                previous_topic=previous_topic
-            )
-            if memory_decision.should_store:
-                self.memory_orchestrator.store_episodic_memory_with_reinforcement(
-                    user_id=session_id, session_id=session_id,
+        async def _store_memory():
+            try:
+                conv_state.add_turn(transcript, llm_reply, instant_psychological_state, topic=conv_state.dialogue_state.primary_topic)
+                previous_topic = conv_state.dialogue_state.primary_topic if current_turn > 1 else None
+                memory_decision = self.memory_orchestrator.detect_memory_worthiness(
                     user_text=transcript, system_response=llm_reply,
                     emotional_state=instant_psychological_state,
                     topic=conv_state.dialogue_state.primary_topic,
-                    importance_score=memory_decision.importance_score,
-                    metadata={"turn": current_turn, "mode": adaptive_state['mode']}
+                    topic_confidence=asr_result.get("llm_context", {}).get("dialogue_state", {}).get("topic_confidence", 0),
+                    previous_topic=previous_topic
                 )
-            if self.memory_orchestrator.should_extract_semantic_memory(session_id, current_turn):
-                from services.llm_client import extract_semantic_facts
-                recent_turns_data = [{"user": t.user_utterance, "ai": t.system_response} for t in conv_state.recent_turns]
-                await asyncio.to_thread(self.memory_orchestrator.extract_semantic_memories, session_id, recent_turns_data, extract_semantic_facts)
-        except Exception as e:
-            logger.error(f"❌ Memory storage failed: {e}")
+                if memory_decision.should_store:
+                    self.memory_orchestrator.store_episodic_memory_with_reinforcement(
+                        user_id=session_id, session_id=session_id,
+                        user_text=transcript, system_response=llm_reply,
+                        emotional_state=instant_psychological_state,
+                        topic=conv_state.dialogue_state.primary_topic,
+                        importance_score=memory_decision.importance_score,
+                        metadata={"turn": current_turn, "mode": adaptive_state['mode']}
+                    )
+                if self.memory_orchestrator.should_extract_semantic_memory(session_id, current_turn):
+                    from services.llm_client import extract_semantic_facts
+                    recent_turns_data = [{"user": t.user_utterance, "ai": t.system_response} for t in conv_state.recent_turns]
+                    await asyncio.to_thread(self.memory_orchestrator.extract_semantic_memories, session_id, recent_turns_data, extract_semantic_facts)
+            except Exception as e:
+                logger.error(f"❌ Memory storage failed: {e}")
         
-        # Save session
-        lock2 = get_session_lock(session_id)
-        async with lock2:
-            save_session(session_id, session)
-            await update_session_metadata(session_id, conv_state, transcript)
+        tts_audio_bytes, _ = await asyncio.gather(_synthesize_tts(), _store_memory())
         
         # Encode audio
         tts_audio_b64 = ""
@@ -979,6 +1001,17 @@ class ConversationalAI:
                 tts_audio_b64 = base64.b64encode(tts_audio_bytes).decode('utf-8')
             except Exception:
                 tts_audio_b64 = ""
+        
+        # Fire-and-forget: save session in background (don't block response)
+        async def _save_session_bg():
+            try:
+                lock2 = get_session_lock(session_id)
+                async with lock2:
+                    save_session(session_id, session)
+                    await update_session_metadata(session_id, conv_state, transcript)
+            except Exception as e:
+                logger.error(f"⚠️ Background session save failed: {e}")
+        asyncio.create_task(_save_session_bg())
         
         return {
             "transcript": transcript,
@@ -1027,6 +1060,166 @@ class ConversationalAI:
                 "long_term_memory": self.memory_orchestrator.get_memory_stats(session_id),
             },
         }
+    
+    @modal.method()
+    async def process_llm(
+        self,
+        asr_result: dict,
+        session_id: str,
+        voice_name: str = "en-IN-KavyaNeural",
+    ) -> dict:
+        """Step 2a: Generate LLM reply + compute TTS params (no audio synthesis).
+        Memory storage and session save happen in background.
+        Returns text + metadata for immediate display.
+        """
+        from services.llm_client import psychological_llm_response
+        
+        lock = get_session_lock(session_id)
+        async with lock:
+            session = get_session(session_id)
+            conv_state = session["conversation"]
+            emotional_tracker = session["emotional_tracker"]
+            tts_controller = session["tts_controller"]
+        
+        transcript = asr_result["transcript"]
+        adaptive_state = asr_result["adaptive_state"]
+        memory_context = asr_result.get("memory_context", "")
+        llm_context = asr_result.get("llm_context", {})
+        instant_psychological_state = asr_result["fusion"]["instant_state"]
+        text_emotion = asr_result["text_emotion"]
+        audio_analysis = asr_result["audio_analysis"]
+        acoustic_features = asr_result["acoustic_features"]
+        current_turn = asr_result["turn_count"]
+        
+        # LLM response
+        logger.info("🤖 Generating LLM response...")
+        llm_reply = await asyncio.to_thread(
+            psychological_llm_response, transcript, adaptive_state, llm_context, memory_context
+        )
+        llm_reply = (llm_reply or "").strip()
+        if not llm_reply or len(llm_reply) < 3:
+            llm_reply = "I'm having trouble responding right now. Could you try that again?"
+        
+        llm_reply_for_tts = _clean_markdown_for_tts(llm_reply)
+        
+        # Compute TTS params (fast, in-process)
+        tts_params = tts_controller.compute(adaptive_state, response_text=llm_reply, voice_name=voice_name)
+        
+        # --- Background: memory storage + session save ---
+        async def _background_persist():
+            try:
+                conv_state.add_turn(transcript, llm_reply, instant_psychological_state, topic=conv_state.dialogue_state.primary_topic)
+                previous_topic = conv_state.dialogue_state.primary_topic if current_turn > 1 else None
+                memory_decision = self.memory_orchestrator.detect_memory_worthiness(
+                    user_text=transcript, system_response=llm_reply,
+                    emotional_state=instant_psychological_state,
+                    topic=conv_state.dialogue_state.primary_topic,
+                    topic_confidence=asr_result.get("llm_context", {}).get("dialogue_state", {}).get("topic_confidence", 0),
+                    previous_topic=previous_topic
+                )
+                if memory_decision.should_store:
+                    self.memory_orchestrator.store_episodic_memory_with_reinforcement(
+                        user_id=session_id, session_id=session_id,
+                        user_text=transcript, system_response=llm_reply,
+                        emotional_state=instant_psychological_state,
+                        topic=conv_state.dialogue_state.primary_topic,
+                        importance_score=memory_decision.importance_score,
+                        metadata={"turn": current_turn, "mode": adaptive_state['mode']}
+                    )
+                if self.memory_orchestrator.should_extract_semantic_memory(session_id, current_turn):
+                    from services.llm_client import extract_semantic_facts
+                    recent_turns_data = [{"user": t.user_utterance, "ai": t.system_response} for t in conv_state.recent_turns]
+                    await asyncio.to_thread(self.memory_orchestrator.extract_semantic_memories, session_id, recent_turns_data, extract_semantic_facts)
+                # Session save
+                lock2 = get_session_lock(session_id)
+                async with lock2:
+                    save_session(session_id, session)
+                    await update_session_metadata(session_id, conv_state, transcript)
+            except Exception as e:
+                logger.error(f"⚠️ Background persist failed: {e}")
+        
+        asyncio.create_task(_background_persist())
+        
+        logger.info(f"💬 LLM response ready ({len(llm_reply)} chars)")
+        
+        return {
+            "transcript": transcript,
+            "llm_reply": llm_reply,
+            "llm_reply_clean": llm_reply_for_tts,
+            "tts_params": tts_params,
+            "turn_count": conv_state.dialogue_state.turn_count,
+            "emotional_mode": adaptive_state['mode'],
+            "instant_state": instant_psychological_state,
+            "adaptive_state": {
+                k: v for k, v in adaptive_state.items() if k not in ['trends', 'stability']
+            },
+            "model_outputs": {
+                "asr": {"transcript": transcript, "latency_ms": asr_result["asr_latency_ms"]},
+                "text_emotion": {
+                    "top_emotions": dict(sorted(text_emotion.items(), key=lambda x: x[1], reverse=True)[:5]),
+                    "all_emotions": text_emotion,
+                },
+                "audio_analysis": audio_analysis,
+                "acoustic_features": acoustic_features,
+                "fusion": asr_result["fusion"],
+            },
+            "memory_view": {
+                "session_id": session_id,
+                "dialogue_state": conv_state.dialogue_state.to_dict(),
+                "recent_turns": [
+                    {
+                        "user": t.user_utterance[:50] + "..." if len(t.user_utterance) > 50 else t.user_utterance,
+                        "ai": t.system_response[:50] + "..." if len(t.system_response) > 50 else t.system_response,
+                        "topic": t.topic,
+                    }
+                    for t in conv_state.recent_turns
+                ],
+                "emotional_trends": {
+                    "mode": adaptive_state['mode'],
+                    "confidence": adaptive_state.get('confidence', 0),
+                    "valence": {"current": adaptive_state['valence'], "trend": adaptive_state.get('trends', {}).get('valence_trend', 0)},
+                    "arousal": {"current": adaptive_state['arousal'], "trend": adaptive_state.get('trends', {}).get('arousal_trend', 0)},
+                    "stress": {"current": adaptive_state['stress'], "trend": adaptive_state.get('trends', {}).get('stress_trend', 0)},
+                    "clarity": {"current": adaptive_state['clarity'], "trend": adaptive_state.get('trends', {}).get('clarity_trend', 0)},
+                },
+                "topic_info": {
+                    "current_topic": conv_state.dialogue_state.primary_topic,
+                    "confidence": conv_state.dialogue_state.topic_confidence,
+                },
+                "long_term_memory": self.memory_orchestrator.get_memory_stats(session_id),
+            },
+        }
+    
+    @modal.method()
+    async def synthesize_tts(
+        self,
+        text: str,
+        tts_params: dict,
+        voice_name: str = "en-IN-KavyaNeural",
+    ) -> dict:
+        """Step 2b: Synthesize TTS audio for given text.
+        Called separately so text can be displayed immediately while audio generates.
+        """
+        from services.tts_azure import synthesize_azure_tts
+        
+        try:
+            logger.info("🔊 Synthesizing TTS audio...")
+            tts_audio_path = await asyncio.to_thread(
+                synthesize_azure_tts, text, tts_params, "/tmp", voice_name
+            )
+            if os.path.exists(tts_audio_path) and os.path.getsize(tts_audio_path) >= 100:
+                with open(tts_audio_path, "rb") as f:
+                    tts_audio_bytes = f.read()
+                os.unlink(tts_audio_path)
+                tts_audio_b64 = base64.b64encode(tts_audio_bytes).decode('utf-8')
+                logger.info(f"✅ TTS audio ready ({len(tts_audio_b64)} chars)")
+                return {"tts_audio": tts_audio_b64}
+            else:
+                logger.warning("⚠️ TTS output too small or missing")
+        except Exception as e:
+            logger.error(f"❌ TTS synthesis failed: {e}")
+        
+        return {"tts_audio": ""}
     
     @modal.method()
     def test_memory_pipeline(self) -> dict:
@@ -1151,18 +1344,42 @@ class ConversationalAI:
             
             return False
         
+        # --- Load CSS and JS at startup for inline embedding ---
+        _css_content = ""
+        _js_content = ""
+        try:
+            with open("/root/frontend/styles.css", "r", encoding="utf-8") as f:
+                _css_content = f.read()
+            with open("/root/frontend/app.js", "r", encoding="utf-8") as f:
+                _js_content = f.read()
+        except FileNotFoundError as e:
+            print(f"⚠️ Could not load frontend assets: {e}")
+
         @web_app.get("/")
         async def root():
-            """Serve frontend interface from file"""
+            """Serve frontend with CSS and JS embedded inline for reliability"""
             with open("/root/frontend/index.html", "r", encoding="utf-8") as f:
                 html_content = f.read()
+            # Replace external CSS link with inline style
+            if _css_content:
+                html_content = html_content.replace(
+                    '<link rel="stylesheet" href="/static/styles.css">',
+                    f'<style>{_css_content}</style>'
+                )
+            # Replace external JS link with inline script
+            if _js_content:
+                html_content = html_content.replace(
+                    '<script src="/static/app.js"></script>',
+                    f'<script>{_js_content}</script>'
+                )
             return HTMLResponse(content=html_content)
         
+        # Keep static routes as fallback
         from fastapi.responses import FileResponse
         
         @web_app.get("/static/{filename}")
         async def serve_static(filename: str):
-            """Serve static frontend assets (CSS, JS)"""
+            """Serve static frontend assets (CSS, JS) — fallback"""
             allowed = {"styles.css", "app.js"}
             if filename not in allowed:
                 raise HTTPException(status_code=404, detail="Not found")
@@ -1294,11 +1511,11 @@ class ConversationalAI:
                 logger.info(f"📥 Processing - Session: {session_id}, Voice: {voice_name}, Audio: {len(audio_base64)} bytes")
                 
                 try:
-                    # Step 1: ASR + emotional analysis (sends transcript early)
+                    # Step 1: ASR + emotional analysis
                     await websocket.send_json({"status": "thinking"})
                     asr_result = await self.process_asr_only.remote.aio(audio_base64, session_id)
                     
-                    # Send transcript + model outputs so user sees progress
+                    # Send transcript + model outputs
                     await websocket.send_json({
                         "status": "transcript",
                         "transcript": asr_result["transcript"],
@@ -1316,12 +1533,24 @@ class ConversationalAI:
                         "turn_count": asr_result["turn_count"],
                     })
                     
-                    # Step 2: LLM + TTS (sends full response)
-                    result = await self.process_llm_and_tts.remote.aio(asr_result, session_id, voice_name)
+                    # Step 2: LLM only (text — fast, no audio)
+                    llm_result = await self.process_llm.remote.aio(asr_result, session_id, voice_name)
                     
-                    logger.debug(f"✅ Conversation turn completed - Turn: {result.get('turn_count', '?')}")
-                    await websocket.send_json(result)
-                    logger.info(f"✅ Response sent to {client_host}")
+                    # Send text immediately — user sees response before audio
+                    await websocket.send_json({"status": "response_text", **llm_result})
+                    logger.info(f"📝 Text sent to {client_host}")
+                    
+                    # Step 3: TTS only (audio synthesis)
+                    tts_result = await self.synthesize_tts.remote.aio(
+                        llm_result["llm_reply_clean"], llm_result["tts_params"], voice_name
+                    )
+                    
+                    # Send audio
+                    await websocket.send_json({
+                        "status": "audio_ready",
+                        "tts_audio": tts_result["tts_audio"],
+                    })
+                    logger.info(f"✅ Audio sent to {client_host}")
                     
                 except asyncio.TimeoutError:
                     logger.error("❌ Conversation processing timeout")

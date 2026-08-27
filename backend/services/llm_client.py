@@ -139,7 +139,7 @@ Respond naturally to continue the conversation. Remember: plain text only, no fo
         {"role": "user", "content": user_text},
     ]
 
-    return _chat_with_fallback(messages, temperature=0.7, max_tokens=400)
+    return _chat_with_fallback(messages, temperature=0.7, max_tokens=500)
 
 
 def extract_semantic_facts(prompt: str) -> str:

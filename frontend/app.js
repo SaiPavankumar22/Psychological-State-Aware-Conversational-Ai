@@ -1,5 +1,5 @@
 /* ============================================================
-   AI Voice Assistant — Application Logic
+   MindVoice — Application Logic
    ============================================================ */
 
 // --- State ---
@@ -16,6 +16,7 @@ const WS_BASE_DELAY = 1000;
 // --- DOM References ---
 const $ = (id) => document.getElementById(id);
 
+const ringArea = document.querySelector('.ring-area');
 const ring = $('assistantRing');
 const statusEl = $('status');
 const startBtn = $('startBtn');
@@ -51,14 +52,9 @@ function getOrCreateSessionId() {
 
 let sessionId = getOrCreateSessionId();
 
-// --- Local Session Store ---
-
 function getLocalSessions() {
-  try {
-    return JSON.parse(localStorage.getItem('chatSessions') || '[]');
-  } catch {
-    return [];
-  }
+  try { return JSON.parse(localStorage.getItem('chatSessions') || '[]'); }
+  catch { return []; }
 }
 
 function saveLocalSessions(sessions) {
@@ -74,11 +70,9 @@ function upsertLocalSession(id, title, turns) {
     existing.last_updated = new Date().toISOString();
   } else {
     sessions.unshift({
-      session_id: id,
-      title: title || 'New Conversation',
+      session_id: id, title: title || 'New Conversation',
       turn_count: turns || 0,
-      created_at: new Date().toISOString(),
-      last_updated: new Date().toISOString(),
+      created_at: new Date().toISOString(), last_updated: new Date().toISOString(),
     });
   }
   sessions.sort((a, b) => (b.last_updated || '').localeCompare(a.last_updated || ''));
@@ -105,39 +99,25 @@ function renderSidebar() {
 
   if (sessions.length === 0) {
     const isSearching = searchInput && searchInput.value.trim();
-    sessionList.innerHTML = `
-      <div class="session-empty">
-        ${isSearching ? 'No matching conversations' : 'No conversations yet.<br>Start speaking to begin!'}
-      </div>`;
+    sessionList.innerHTML = `<div class="session-empty">${isSearching ? 'No matches' : 'No conversations yet'}</div>`;
     return;
   }
 
-  sessionList.innerHTML = sessions
-    .map((s) => {
-      const isActive = s.session_id === sessionId;
-      const date = new Date(s.last_updated);
-      const timeStr = date.toLocaleString('en-US', {
-        month: 'short',
-        day: 'numeric',
-        hour: '2-digit',
-        minute: '2-digit',
-      });
-      const title = s.title || 'New Conversation';
-      const turns = s.turn_count || 0;
-
-      return `
-        <div class="session-item ${isActive ? 'active' : ''}"
-             onclick="switchToSession('${s.session_id}')">
-          <div class="session-info">
-            <div class="session-title">${escapeHtml(title)}</div>
-            <div class="session-meta">${timeStr} · ${turns} turn${turns !== 1 ? 's' : ''}</div>
-          </div>
-          <button class="delete-session-btn"
-                  onclick="deleteSession(event, '${s.session_id}')"
-                  title="Delete">✕</button>
-        </div>`;
-    })
-    .join('');
+  sessionList.innerHTML = sessions.map((s) => {
+    const isActive = s.session_id === sessionId;
+    const date = new Date(s.last_updated);
+    const timeStr = date.toLocaleString('en-US', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+    const title = s.title || 'New Conversation';
+    const turns = s.turn_count || 0;
+    return `
+      <div class="session-item ${isActive ? 'active' : ''}" onclick="switchToSession('${s.session_id}')">
+        <div class="session-info">
+          <div class="session-title">${escapeHtml(title)}</div>
+          <div class="session-meta">${timeStr} · ${turns} turn${turns !== 1 ? 's' : ''}</div>
+        </div>
+        <button class="delete-btn" onclick="deleteSession(event, '${s.session_id}')" title="Delete">✕</button>
+      </div>`;
+  }).join('');
 }
 
 async function loadSessions() {
@@ -151,9 +131,7 @@ async function loadSessions() {
         renderSidebar();
       }
     }
-  } catch {
-    /* server may be down — localStorage sidebar still works */
-  }
+  } catch { /* localStorage sidebar works offline */ }
 }
 
 // ============================================================
@@ -165,14 +143,12 @@ async function createNewSession() {
     const resp = await fetch('/api/sessions/new', { method: 'POST' });
     const data = await resp.json();
     sessionId = data.session_id;
-  } catch {
-    sessionId = 'local_' + Date.now();
-  }
+  } catch { sessionId = 'local_' + Date.now(); }
   localStorage.setItem('currentSessionId', sessionId);
   upsertLocalSession(sessionId, 'New Conversation', 0);
   clearConversationUI();
   renderSidebar();
-  showStatus('✅ New session created!', 'success');
+  showStatus('New session created', 'success');
 }
 
 function switchToSession(newId) {
@@ -181,26 +157,16 @@ function switchToSession(newId) {
   localStorage.setItem('currentSessionId', sessionId);
   clearConversationUI();
   renderSidebar();
-  showStatus('🔄 Switched to conversation', 'info');
 }
 
 async function deleteSession(event, id) {
   event.stopPropagation();
   if (!confirm('Delete this conversation?')) return;
-
   removeLocalSession(id);
-  try {
-    await fetch(`/api/sessions/${id}`, { method: 'DELETE' });
-  } catch {
-    /* server may be down */
-  }
-
-  if (id === sessionId) {
-    await createNewSession();
-  } else {
-    renderSidebar();
-  }
-  showStatus('✅ Session deleted', 'success');
+  try { await fetch(`/api/sessions/${id}`, { method: 'DELETE' }); } catch {}
+  if (id === sessionId) await createNewSession();
+  else renderSidebar();
+  showStatus('Session deleted', 'success');
 }
 
 function clearConversationUI() {
@@ -213,59 +179,53 @@ function clearConversationUI() {
 }
 
 // ============================================================
-// SEARCH
+// SEARCH / EXPORT / DEBUG
 // ============================================================
 
-function filterSessions() {
-  renderSidebar();
-}
-
-// ============================================================
-// EXPORT
-// ============================================================
+function filterSessions() { renderSidebar(); }
 
 function exportConversation() {
   const sessions = getLocalSessions();
   const active = sessions.find((s) => s.session_id === sessionId);
-
   const exportData = {
     exported_at: new Date().toISOString(),
     session: active || { session_id: sessionId, title: 'Unknown' },
     all_sessions: sessions,
   };
-
   const blob = new Blob([JSON.stringify(exportData, null, 2)], { type: 'application/json' });
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = url;
-  a.download = `conversation_${sessionId}_${new Date().toISOString().slice(0, 10)}.json`;
+  a.download = `mindvoice_${new Date().toISOString().slice(0, 10)}.json`;
   a.click();
   URL.revokeObjectURL(url);
-  showStatus('📥 Conversation exported!', 'success');
+  showStatus('Exported!', 'success');
+}
+
+function toggleDebugPanels() {
+  const section = $('debugSection');
+  section.style.display = section.style.display === 'none' ? '' : 'none';
 }
 
 // ============================================================
-// STATUS / ERROR MESSAGES
+// STATUS / THINKING
 // ============================================================
 
 function showError(message) {
   const text = message.startsWith('❌') ? message : '❌ ' + message;
   errorBox.textContent = text;
-  errorBox.className = 'status-message error';
+  errorBox.className = 'toast error';
   errorBox.classList.remove('hidden');
   setTimeout(() => errorBox.classList.add('hidden'), 5000);
 }
 
 function showStatus(message, type = 'info') {
-  errorBox.textContent = message;
-  errorBox.className = `status-message ${type}`;
+  const icons = { success: '✓', error: '✕', info: 'ℹ' };
+  errorBox.textContent = (icons[type] || '') + ' ' + message;
+  errorBox.className = `toast ${type}`;
   errorBox.classList.remove('hidden');
   setTimeout(() => errorBox.classList.add('hidden'), 3000);
 }
-
-// ============================================================
-// THINKING INDICATOR
-// ============================================================
 
 function showThinking(text) {
   thinkingText.textContent = text || 'Thinking...';
@@ -277,15 +237,38 @@ function hideThinking() {
 }
 
 // ============================================================
+// MARKDOWN STRIPPING
+// ============================================================
+
+function stripMarkdown(text) {
+  if (!text) return '';
+  return text
+    .replace(/\*{3}(.+?)\*{3}/g, '$1')
+    .replace(/\*\*(.+?)\*\*/g, '$1')
+    .replace(/\*(.+?)\*/g, '$1')
+    .replace(/_{3}(.+?)_{3}/g, '$1')
+    .replace(/__(.+?)__/g, '$1')
+    .replace(/(?<!\w)_(.+?)_(?!\w)/g, '$1')
+    .replace(/~~(.+?)~~/g, '$1')
+    .replace(/`([^`]+)`/g, '$1')
+    .replace(/```[\s\S]*?```/g, '')
+    .replace(/^#{1,6}\s+/gm, '')
+    .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')
+    .replace(/!\[([^\]]*)\]\([^)]+\)/g, '$1')
+    .trim();
+}
+
+// ============================================================
 // PROGRESSIVE TEXT REVEAL
 // ============================================================
 
 async function streamText(element, text) {
+  const clean = stripMarkdown(text);
   element.textContent = '';
-  const words = text.split(/(\s+)/);
+  const words = clean.split(/(\s+)/);
   for (let i = 0; i < words.length; i++) {
     element.textContent += words[i];
-    const delay = words[i].trim() ? Math.random() * 20 + 10 : 5;
+    const delay = words[i].trim() ? Math.random() * 18 + 8 : 4;
     await new Promise((r) => setTimeout(r, delay));
   }
 }
@@ -295,35 +278,30 @@ async function streamText(element, text) {
 // ============================================================
 
 function browserSpeak(text, onEnd) {
-  if (!('speechSynthesis' in window) || !text) {
-    if (onEnd) onEnd();
-    return;
-  }
+  if (!('speechSynthesis' in window) || !text) { if (onEnd) onEnd(); return; }
   window.speechSynthesis.cancel();
-
-  const cleanText = text.replace(/\*\*/g, '').replace(/\*/g, '').replace(/_/g, '').replace(/`/g, '');
-  const utterance = new SpeechSynthesisUtterance(cleanText);
+  const utterance = new SpeechSynthesisUtterance(stripMarkdown(text));
   utterance.rate = 1.0;
-  utterance.pitch = 1.0;
-
   const voices = window.speechSynthesis.getVoices();
-  const preferred =
-    voices.find((v) => v.lang.startsWith('en') && v.name.includes('Female')) ||
-    voices.find((v) => v.lang.startsWith('en')) ||
-    voices[0];
+  const preferred = voices.find((v) => v.lang.startsWith('en')) || voices[0];
   if (preferred) utterance.voice = preferred;
-
-  ring.className = 'assistant-ring speaking';
-  statusEl.textContent = '🔊 Speaking (browser)...';
-
+  setRingState('speaking');
+  statusEl.textContent = 'Speaking...';
   utterance.onend = () => { if (onEnd) onEnd(); };
   utterance.onerror = () => { if (onEnd) onEnd(); };
-
   window.speechSynthesis.speak(utterance);
 }
-
 if ('speechSynthesis' in window) {
   window.speechSynthesis.onvoiceschanged = () => window.speechSynthesis.getVoices();
+}
+
+// ============================================================
+// RING STATE
+// ============================================================
+
+function setRingState(state) {
+  ringArea.className = 'ring-area';
+  if (state) ringArea.classList.add(state);
 }
 
 // ============================================================
@@ -333,21 +311,15 @@ if ('speechSynthesis' in window) {
 function drawSparkline() {
   const canvas = $('emotionSparkline');
   if (!canvas || emotionHistory.length < 2) return;
-
   const container = $('sparklineContainer');
   container.style.display = 'block';
-
   const ctx = canvas.getContext('2d');
   const dpr = window.devicePixelRatio || 1;
   const rect = canvas.getBoundingClientRect();
   canvas.width = rect.width * dpr;
   canvas.height = rect.height * dpr;
   ctx.scale(dpr, dpr);
-
-  const w = rect.width;
-  const h = rect.height;
-  const pad = 5;
-
+  const w = rect.width, h = rect.height, pad = 4;
   ctx.clearRect(0, 0, w, h);
 
   const vals = emotionHistory.map((d) => (d.valence + 1) / 2);
@@ -355,37 +327,32 @@ function drawSparkline() {
 
   function drawLine(data, color) {
     const step = (w - pad * 2) / Math.max(data.length - 1, 1);
-
-    ctx.beginPath();
-    ctx.strokeStyle = color;
-    ctx.lineWidth = 2;
-    ctx.lineJoin = 'round';
-
+    ctx.beginPath(); ctx.strokeStyle = color; ctx.lineWidth = 1.5; ctx.lineJoin = 'round';
     for (let i = 0; i < data.length; i++) {
       const x = pad + i * step;
       const y = h - pad - data[i] * (h - pad * 2);
       i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
     }
     ctx.stroke();
-
-    for (let i = 0; i < data.length; i++) {
-      const x = pad + i * step;
-      const y = h - pad - data[i] * (h - pad * 2);
-      ctx.beginPath();
-      ctx.arc(x, y, 3, 0, Math.PI * 2);
-      ctx.fillStyle = color;
-      ctx.fill();
-    }
   }
-
   drawLine(vals, '#34d399');
   drawLine(strs, '#f87171');
+}
 
-  ctx.font = '10px sans-serif';
-  ctx.fillStyle = '#34d399';
-  ctx.fillText('● Valence', 5, 12);
-  ctx.fillStyle = '#f87171';
-  ctx.fillText('● Stress', 80, 12);
+// ============================================================
+// CIRCULAR EMOTION RING UPDATE
+// ============================================================
+
+function updateEmotionRing(ringId, value, maxVal) {
+  const el = $(ringId);
+  if (!el) return;
+  const pct = Math.min(Math.abs(value) / maxVal, 1);
+  const offset = 100 - (pct * 100);
+  el.style.strokeDashoffset = offset;
+  // Color based on value
+  if (value > 0.3) el.style.stroke = '#34d399';
+  else if (value < -0.3 || value > 0.6) el.style.stroke = '#f87171';
+  else el.style.stroke = '#8b5cf6';
 }
 
 // ============================================================
@@ -396,85 +363,83 @@ function updateState(data) {
   stateInfo.classList.remove('hidden');
   const s = data.adaptive_state;
 
-  $('valence').textContent =
-    s.valence > 0 ? `😊 +${s.valence.toFixed(2)}` : `😔 ${s.valence.toFixed(2)}`;
-  $('arousal').textContent = `⚡ ${(s.arousal * 100).toFixed(0)}%`;
-  $('clarity').textContent = `💡 ${(s.clarity * 100).toFixed(0)}%`;
-  $('stress').textContent =
-    s.stress > 0.5 ? `😰 ${(s.stress * 100).toFixed(0)}%` : `😌 ${(s.stress * 100).toFixed(0)}%`;
+  const val = s.valence;
+  $('valence').textContent = val > 0 ? `+${val.toFixed(2)}` : val.toFixed(2);
+  updateEmotionRing('valenceRing', (val + 1) / 2, 1);
+  $('valenceEmoji').textContent = val > 0.3 ? '😊' : val < -0.3 ? '😔' : '😐';
+
+  const ar = s.arousal;
+  $('arousal').textContent = `${(ar * 100).toFixed(0)}%`;
+  updateEmotionRing('arousalRing', ar, 1);
+  $('arousalEmoji').textContent = ar > 0.6 ? '🔥' : ar > 0.3 ? '⚡' : '😴';
+
+  const cl = s.clarity;
+  $('clarity').textContent = `${(cl * 100).toFixed(0)}%`;
+  updateEmotionRing('clarityRing', cl, 1);
+  $('clarityEmoji').textContent = cl > 0.7 ? '💡' : cl > 0.4 ? '🤔' : '❓';
+
+  const st = s.stress;
+  $('stress').textContent = `${(st * 100).toFixed(0)}%`;
+  updateEmotionRing('stressRing', st, 1);
+  $('stressEmoji').textContent = st > 0.6 ? '😰' : st > 0.3 ? '😐' : '😌';
 
   turnCount.textContent = data.turn_count;
 
   if (data.emotional_mode === 'trend') {
-    modeBadge.textContent = 'Trend Mode';
-    modeBadge.className = 'mode-badge mode-trend';
+    modeBadge.innerHTML = '<span class="mode-dot"></span>Trend';
+    modeBadge.className = 'mode-pill trend';
   } else {
-    modeBadge.textContent = 'Instant Mode';
-    modeBadge.className = 'mode-badge mode-instant';
+    modeBadge.innerHTML = '<span class="mode-dot"></span>Instant';
+    modeBadge.className = 'mode-pill';
   }
 }
 
 function updateTrendIndicator(elementId, trend) {
   const el = $(elementId);
-  if (trend > 0.05) {
-    el.textContent = '↗️';
-    el.className = 'trend-indicator trend-up';
-  } else if (trend < -0.05) {
-    el.textContent = '↘️';
-    el.className = 'trend-indicator trend-down';
-  } else {
-    el.textContent = '→';
-    el.className = 'trend-indicator trend-stable';
-  }
+  if (!el) return;
+  if (trend > 0.05) { el.textContent = '↗'; el.className = 'trend trend-up'; }
+  else if (trend < -0.05) { el.textContent = '↘'; el.className = 'trend trend-down'; }
+  else { el.textContent = '→'; el.className = 'trend trend-stable'; }
 }
 
 function updateMemoryView(data) {
   if (!data.memory_view) return;
   const mem = data.memory_view;
 
-  $('memSessionId').textContent = mem.session_id.substring(0, 15) + '...';
+  $('memSessionId').textContent = mem.session_id.substring(0, 12) + '…';
   $('memTurnCount').textContent = mem.dialogue_state.turn_count;
   $('memTopic').textContent = mem.topic_info.current_topic;
   $('memTopicConf').textContent = (mem.topic_info.confidence * 100).toFixed(0) + '%';
-
   $('memMode').textContent = mem.emotional_trends.mode;
   $('memModeConf').textContent = (mem.emotional_trends.confidence * 100).toFixed(0) + '%';
 
   const valence = mem.emotional_trends.valence;
   $('memValence').textContent = valence.current.toFixed(2);
   updateTrendIndicator('memValenceTrend', valence.trend);
-
   const arousal = mem.emotional_trends.arousal;
   $('memArousal').textContent = arousal.current.toFixed(2);
   updateTrendIndicator('memArousalTrend', arousal.trend);
-
   const stress = mem.emotional_trends.stress;
   $('memStress').textContent = stress.current.toFixed(2);
   updateTrendIndicator('memStressTrend', stress.trend);
-
   const clarity = mem.emotional_trends.clarity;
   $('memClarity').textContent = clarity.current.toFixed(2);
   updateTrendIndicator('memClarityTrend', clarity.trend);
 
-  // Sparkline
   emotionHistory.push({ valence: valence.current, stress: stress.current, turn: data.turn_count });
   if (emotionHistory.length > 20) emotionHistory.shift();
   drawSparkline();
 
-  // Recent turns
   const turnsContainer = $('memRecentTurns');
   if (mem.recent_turns.length > 0) {
-    turnsContainer.innerHTML = mem.recent_turns
-      .map((turn, idx) => {
-        const turnNum = data.turn_count - mem.recent_turns.length + idx + 1;
-        return `
-          <div class="turn-card">
-            <div class="turn-card-meta">Turn ${turnNum} · ${turn.topic}</div>
-            <div class="turn-card-user">👤 ${escapeHtml(turn.user)}</div>
-            <div class="turn-card-ai">🤖 ${escapeHtml(turn.ai)}</div>
-          </div>`;
-      })
-      .join('');
+    turnsContainer.innerHTML = mem.recent_turns.map((turn, idx) => {
+      const turnNum = data.turn_count - mem.recent_turns.length + idx + 1;
+      return `<div class="debug-turn">
+        <div class="debug-turn-meta">Turn ${turnNum} · ${turn.topic}</div>
+        <div class="debug-turn-user">👤 ${escapeHtml(turn.user)}</div>
+        <div class="debug-turn-ai">🤖 ${escapeHtml(turn.ai)}</div>
+      </div>`;
+    }).join('');
   }
 
   if (mem.dialogue_state.recent_intents.length > 0) {
@@ -496,27 +461,15 @@ function updateModelOutputs(data) {
 
   if (m.asr) {
     $('modelASR').innerHTML = `
-      <div class="data-row">
-        <span class="data-label">Transcript:</span>
-        <span class="data-value">${escapeHtml(m.asr.transcript.substring(0, 50))}...</span>
-      </div>
-      <div class="data-row">
-        <span class="data-label">Latency:</span>
-        <span class="data-value">${m.asr.latency_ms.toFixed(0)}ms</span>
-      </div>`;
+      <div class="debug-row"><span class="dl">Text</span><span class="dv">${escapeHtml(m.asr.transcript.substring(0, 40))}…</span></div>
+      <div class="debug-row"><span class="dl">Latency</span><span class="dv">${m.asr.latency_ms.toFixed(0)}ms</span></div>`;
   }
 
   if (m.text_emotion && m.text_emotion.top_emotions) {
     let html = '';
     for (const [emotion, score] of Object.entries(m.text_emotion.top_emotions)) {
-      html += `
-        <div class="data-row">
-          <span class="data-label">${emotion}:</span>
-          <span class="data-value">${(score * 100).toFixed(1)}%</span>
-        </div>
-        <div class="emotion-bar">
-          <div class="emotion-bar-fill" style="width: ${score * 100}%"></div>
-        </div>`;
+      html += `<div class="debug-row"><span class="dl">${emotion}</span><span class="dv">${(score * 100).toFixed(1)}%</span></div>
+        <div class="ebar"><div class="ebar-fill" style="width:${score * 100}%"></div></div>`;
     }
     $('modelTextEmotion').innerHTML = html;
   }
@@ -524,15 +477,10 @@ function updateModelOutputs(data) {
   if (m.audio_analysis && m.audio_analysis.ser) {
     const ser = m.audio_analysis.ser;
     $('modelSER').innerHTML = `
-      <div class="data-row"><span class="data-label">Angry:</span><span class="data-value">${(ser.angry * 100).toFixed(1)}%</span></div>
-      <div class="emotion-bar"><div class="emotion-bar-fill" style="width: ${ser.angry * 100}%"></div></div>
-      <div class="data-row"><span class="data-label">Happy:</span><span class="data-value">${(ser.happy * 100).toFixed(1)}%</span></div>
-      <div class="emotion-bar"><div class="emotion-bar-fill" style="width: ${ser.happy * 100}%"></div></div>
-      <div class="data-row"><span class="data-label">Neutral:</span><span class="data-value">${(ser.neutral * 100).toFixed(1)}%</span></div>
-      <div class="emotion-bar"><div class="emotion-bar-fill" style="width: ${ser.neutral * 100}%"></div></div>
-      <div class="data-row"><span class="data-label">Sad:</span><span class="data-value">${(ser.sad * 100).toFixed(1)}%</span></div>
-      <div class="emotion-bar"><div class="emotion-bar-fill" style="width: ${ser.sad * 100}%"></div></div>
-      <div class="data-row"><span class="data-label">Latency:</span><span class="data-value">${m.audio_analysis.latency_ms.toFixed(0)}ms</span></div>`;
+      <div class="debug-row"><span class="dl">Angry</span><span class="dv">${(ser.angry * 100).toFixed(1)}%</span></div>
+      <div class="debug-row"><span class="dl">Happy</span><span class="dv">${(ser.happy * 100).toFixed(1)}%</span></div>
+      <div class="debug-row"><span class="dl">Neutral</span><span class="dv">${(ser.neutral * 100).toFixed(1)}%</span></div>
+      <div class="debug-row"><span class="dl">Sad</span><span class="dv">${(ser.sad * 100).toFixed(1)}%</span></div>`;
   }
 
   if (m.audio_analysis && m.audio_analysis.ast) {
@@ -540,33 +488,31 @@ function updateModelOutputs(data) {
     if (Object.keys(ast).length > 0) {
       let html = '';
       for (const [event, score] of Object.entries(ast)) {
-        html += `
-          <div class="data-row"><span class="data-label">${event}:</span><span class="data-value">${(score * 100).toFixed(1)}%</span></div>
-          <div class="emotion-bar"><div class="emotion-bar-fill" style="width: ${score * 100}%"></div></div>`;
+        html += `<div class="debug-row"><span class="dl">${event}</span><span class="dv">${(score * 100).toFixed(1)}%</span></div>`;
       }
       $('modelAST').innerHTML = html;
     } else {
-      $('modelAST').innerHTML = '<div class="data-row"><span class="data-label">No events detected</span></div>';
+      $('modelAST').innerHTML = '<div class="debug-row"><span>No events</span></div>';
     }
   }
 
   if (m.acoustic_features) {
     const a = m.acoustic_features;
     $('modelAcoustic').innerHTML = `
-      <div class="data-row"><span class="data-label">Speech Rate:</span><span class="data-value">${a.speech_rate.toFixed(2)} WPS</span></div>
-      <div class="data-row"><span class="data-label">Pause Duration:</span><span class="data-value">${a.pause_duration.toFixed(3)} s</span></div>
-      <div class="data-row"><span class="data-label">Jitter:</span><span class="data-value">${a.jitter.toFixed(3)}</span></div>
-      <div class="data-row"><span class="data-label">Word Count:</span><span class="data-value">${a.word_count}</span></div>
-      <div class="data-row"><span class="data-label">Audio Duration:</span><span class="data-value">${a.audio_duration.toFixed(2)} s</span></div>`;
+      <div class="debug-row"><span class="dl">Rate</span><span class="dv">${a.speech_rate.toFixed(1)} WPS</span></div>
+      <div class="debug-row"><span class="dl">Pauses</span><span class="dv">${a.pause_duration.toFixed(2)}s</span></div>
+      <div class="debug-row"><span class="dl">Jitter</span><span class="dv">${a.jitter.toFixed(3)}</span></div>
+      <div class="debug-row"><span class="dl">Words</span><span class="dv">${a.word_count}</span></div>
+      <div class="debug-row"><span class="dl">Duration</span><span class="dv">${a.audio_duration.toFixed(1)}s</span></div>`;
   }
 
   if (m.fusion && m.fusion.instant_state) {
     const s = m.fusion.instant_state;
     $('modelFusion').innerHTML = `
-      <div class="data-row"><span class="data-label">Valence:</span><span class="data-value">${s.valence.toFixed(3)}</span></div>
-      <div class="data-row"><span class="data-label">Arousal:</span><span class="data-value">${s.arousal.toFixed(3)}</span></div>
-      <div class="data-row"><span class="data-label">Stress:</span><span class="data-value">${s.stress.toFixed(3)}</span></div>
-      <div class="data-row"><span class="data-label">Clarity:</span><span class="data-value">${s.clarity.toFixed(3)}</span></div>`;
+      <div class="debug-row"><span class="dl">Valence</span><span class="dv">${s.valence.toFixed(3)}</span></div>
+      <div class="debug-row"><span class="dl">Arousal</span><span class="dv">${s.arousal.toFixed(3)}</span></div>
+      <div class="debug-row"><span class="dl">Stress</span><span class="dv">${s.stress.toFixed(3)}</span></div>
+      <div class="debug-row"><span class="dl">Clarity</span><span class="dv">${s.clarity.toFixed(3)}</span></div>`;
   }
 }
 
@@ -579,117 +525,109 @@ function connectWebSocket() {
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     ws = new WebSocket(`${protocol}//${window.location.host}/ws/conversation`);
 
-    ws.onopen = () => {
-      console.log('✅ WebSocket connected');
-      wsReconnectAttempts = 0;
-      resolve(ws);
-    };
+    ws.onopen = () => { wsReconnectAttempts = 0; resolve(ws); };
 
     ws.onmessage = async (event) => {
       try {
         const data = JSON.parse(event.data);
 
         if (data.error) {
-          hideThinking();
-          showError(data.error);
-          resetUI();
-          lastSentPayload = null;
+          hideThinking(); showError(data.error); resetUI(); lastSentPayload = null;
           return;
         }
 
-        console.log('📨 Received:', data);
-
-        // --- Streaming: thinking ---
+        // --- thinking ---
         if (data.status === 'thinking') {
           showThinking('Analyzing your voice...');
-          ring.className = 'assistant-ring processing';
-          statusEl.textContent = '🤔 Listening to your voice...';
+          setRingState('processing');
+          statusEl.textContent = 'Listening...';
           return;
         }
 
-        // --- Streaming: transcript ready ---
+        // --- transcript ready ---
         if (data.status === 'transcript') {
           hideThinking();
           showThinking('Generating response...');
           lastSentPayload = null;
-
           transcriptBox.classList.remove('hidden');
           transcriptEl.textContent = data.transcript;
-
           responseBox.classList.remove('hidden');
           responseEl.textContent = '';
-
           if (data.adaptive_state) updateState(data);
           if (data.model_outputs) updateModelOutputs(data);
-
-          statusEl.textContent = '🤖 Generating response...';
+          statusEl.textContent = 'Generating...';
           return;
         }
 
-        // --- Final response ---
-        hideThinking();
-        lastSentPayload = null;
+        // --- response text ready (no audio yet) ---
+        if (data.status === 'response_text') {
+          hideThinking();
+          transcriptBox.classList.remove('hidden');
+          transcriptEl.textContent = data.transcript;
+          responseBox.classList.remove('hidden');
+          streamText(responseEl, data.llm_reply);
+          updateState(data);
+          updateMemoryView(data);
+          updateModelOutputs(data);
+          upsertLocalSession(sessionId, data.transcript, data.turn_count);
+          renderSidebar();
+          statusEl.textContent = 'Generating audio...';
+          setRingState('processing');
+          return;
+        }
 
+        // --- audio ready ---
+        if (data.status === 'audio_ready') {
+          hideThinking(); lastSentPayload = null;
+          if (data.tts_audio) {
+            playAzureAudio(data.tts_audio, responseEl.textContent || responseEl.innerText);
+          } else {
+            browserSpeak(responseEl.textContent || responseEl.innerText, () => {
+              resetUI(); ws.close();
+            });
+          }
+          return;
+        }
+
+        // --- fallback: legacy full response ---
+        hideThinking(); lastSentPayload = null;
         transcriptBox.classList.remove('hidden');
         transcriptEl.textContent = data.transcript;
-
         responseBox.classList.remove('hidden');
-        await streamText(responseEl, data.llm_reply);
-
+        streamText(responseEl, data.llm_reply);
         updateState(data);
         updateMemoryView(data);
         updateModelOutputs(data);
-
         upsertLocalSession(sessionId, data.transcript, data.turn_count);
         renderSidebar();
-
-        // Audio playback (Azure TTS or browser fallback)
         if (data.tts_audio) {
           playAzureAudio(data.tts_audio, data.llm_reply);
         } else {
-          browserSpeak(data.llm_reply, () => {
-            resetUI();
-            ws.close();
-          });
+          browserSpeak(data.llm_reply, () => { resetUI(); ws.close(); });
         }
       } catch (e) {
-        console.error('Error:', e);
-        hideThinking();
-        showError('Error processing response');
-        resetUI();
+        console.error('WS error:', e);
+        hideThinking(); showError('Error processing response'); resetUI();
       }
     };
 
-    ws.onerror = () => {
-      console.error('WebSocket error');
-      reject(new Error('WebSocket connection failed'));
-    };
-
+    ws.onerror = () => reject(new Error('WebSocket failed'));
     ws.onclose = (event) => {
-      console.log(`🔌 WebSocket closed (code: ${event.code})`);
-
       if (lastSentPayload && wsReconnectAttempts < WS_MAX_RECONNECT) {
         const delay = WS_BASE_DELAY * Math.pow(2, wsReconnectAttempts);
         wsReconnectAttempts++;
-        statusEl.textContent = `🔄 Reconnecting... (${wsReconnectAttempts}/${WS_MAX_RECONNECT})`;
-        ring.className = 'assistant-ring processing';
-
+        statusEl.textContent = `Reconnecting (${wsReconnectAttempts}/${WS_MAX_RECONNECT})...`;
+        setRingState('processing');
         setTimeout(async () => {
           try {
             await connectWebSocket();
             ws.send(lastSentPayload);
-            statusEl.textContent = '🤔 Processing...';
           } catch {
-            showError(
-              `Connection lost. ${wsReconnectAttempts >= WS_MAX_RECONNECT ? 'Max retries reached.' : 'Retrying...'}`
-            );
-            lastSentPayload = null;
-            resetUI();
+            showError('Connection lost');
+            lastSentPayload = null; resetUI();
           }
         }, delay);
-      } else if (!lastSentPayload) {
-        resetUI();
-      }
+      } else if (!lastSentPayload) { resetUI(); }
     };
   });
 }
@@ -698,29 +636,19 @@ function playAzureAudio(base64Audio, fallbackText) {
   const audioData = atob(base64Audio);
   const audioArray = new Uint8Array(audioData.length);
   for (let i = 0; i < audioData.length; i++) audioArray[i] = audioData.charCodeAt(i);
-
   const audioBlob = new Blob([audioArray], { type: 'audio/wav' });
   const audioUrl = URL.createObjectURL(audioBlob);
   const audio = new Audio(audioUrl);
-
-  ring.className = 'assistant-ring speaking';
-  statusEl.textContent = '🔊 Speaking...';
-
+  setRingState('speaking');
+  statusEl.textContent = 'Speaking...';
   audio.play().catch(() => {
-    browserSpeak(fallbackText, () => {
-      resetUI();
-      ws.close();
-    });
+    browserSpeak(fallbackText, () => { resetUI(); ws.close(); });
   });
-
-  audio.onended = () => {
-    resetUI();
-    ws.close();
-  };
+  audio.onended = () => { resetUI(); ws.close(); };
 }
 
 function resetUI() {
-  ring.className = 'assistant-ring';
+  setRingState('');
   statusEl.textContent = 'Ready to listen';
   startBtn.disabled = false;
   stopBtn.disabled = true;
@@ -732,56 +660,29 @@ function resetUI() {
 
 async function startRecording() {
   if (isRecording) return;
-
   try {
     transcriptBox.classList.add('hidden');
     responseBox.classList.add('hidden');
     hideThinking();
 
-    if (!ws || ws.readyState !== WebSocket.OPEN) {
-      await connectWebSocket();
-    }
+    if (!ws || ws.readyState !== WebSocket.OPEN) await connectWebSocket();
 
     stream = await navigator.mediaDevices.getUserMedia({
-      audio: {
-        channelCount: 1,
-        sampleRate: 16000,
-        echoCancellation: true,
-        noiseSuppression: true,
-        autoGainControl: true,
-      },
+      audio: { channelCount: 1, sampleRate: 16000, echoCancellation: true, noiseSuppression: true, autoGainControl: true },
     });
 
-    mediaRecorder = new MediaRecorder(stream, {
-      mimeType: 'audio/webm;codecs=opus',
-    });
-
+    mediaRecorder = new MediaRecorder(stream, { mimeType: 'audio/webm;codecs=opus' });
     audioChunks = [];
-
-    mediaRecorder.ondataavailable = (e) => {
-      if (e.data.size > 0) audioChunks.push(e.data);
-    };
+    mediaRecorder.ondataavailable = (e) => { if (e.data.size > 0) audioChunks.push(e.data); };
 
     mediaRecorder.onstop = async () => {
       const audioBlob = new Blob(audioChunks, { type: 'audio/webm' });
       const arrayBuffer = await audioBlob.arrayBuffer();
-
-      console.log(`📤 Sending ${arrayBuffer.byteLength} bytes`);
-
-      ring.className = 'assistant-ring processing';
-      statusEl.textContent = '🤔 Processing...';
-
-      const base64Audio = btoa(
-        new Uint8Array(arrayBuffer).reduce((data, byte) => data + String.fromCharCode(byte), '')
-      );
-
+      setRingState('processing');
+      statusEl.textContent = 'Processing...';
+      const base64Audio = btoa(new Uint8Array(arrayBuffer).reduce((data, byte) => data + String.fromCharCode(byte), ''));
       const selectedVoice = $('voiceSelect').value;
-      const payload = JSON.stringify({
-        audio: base64Audio,
-        session_id: sessionId,
-        voice_name: selectedVoice,
-      });
-
+      const payload = JSON.stringify({ audio: base64Audio, session_id: sessionId, voice_name: selectedVoice });
       lastSentPayload = payload;
       ws.send(payload);
       stream.getTracks().forEach((track) => track.stop());
@@ -789,13 +690,13 @@ async function startRecording() {
 
     mediaRecorder.start();
     isRecording = true;
-
-    ring.className = 'assistant-ring listening';
-    statusEl.textContent = '🎙️ Listening... (click Stop when done)';
+    setRingState('listening');
+    ringArea.classList.add('active');
+    statusEl.textContent = 'Listening... (press Stop when done)';
     startBtn.disabled = true;
     stopBtn.disabled = false;
   } catch (error) {
-    console.error('Error:', error);
+    console.error('Recording error:', error);
     showError('Microphone access denied or connection failed');
     resetUI();
   }
@@ -805,6 +706,7 @@ function stopRecording() {
   if (!isRecording || !mediaRecorder) return;
   mediaRecorder.stop();
   isRecording = false;
+  ringArea.classList.remove('active');
   stopBtn.disabled = true;
 }
 
@@ -822,23 +724,15 @@ function escapeHtml(str) {
 // ============================================================
 
 document.addEventListener('keydown', (e) => {
-  // Don't trigger when typing in search
   if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
-
   if (e.code === 'Space' && !e.repeat) {
     e.preventDefault();
-    if (isRecording) {
-      stopRecording();
-    } else if (!startBtn.disabled) {
-      startRecording();
-    }
+    if (isRecording) stopRecording();
+    else if (!startBtn.disabled) startRecording();
   }
-
-  if (e.code === 'Escape') {
-    if (isRecording) {
-      stopRecording();
-      showError('Recording cancelled');
-    }
+  if (e.code === 'Escape' && isRecording) {
+    stopRecording();
+    showError('Recording cancelled');
   }
 });
 

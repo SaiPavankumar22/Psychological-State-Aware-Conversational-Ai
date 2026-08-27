@@ -22,11 +22,19 @@ from transformers import (
 SER_LABELS = ["angry", "happy", "neutral", "sad"]
 
 PSYCHOLOGICAL_EMOTIONS = [
+    # Negative
     "anger", "fear", "sadness", "grief", "remorse",
     "disgust", "nervousness", "disappointment", "embarrassment",
+    "annoyance", "disapproval",
+    # Cognitive
     "confusion", "realization", "surprise",
+    # Positive
     "joy", "optimism", "love", "gratitude", "relief",
-    "curiosity", "caring", "desire", "neutral",
+    "excitement", "pride", "amusement", "admiration", "approval",
+    # Social
+    "curiosity", "caring", "desire",
+    # Default
+    "neutral",
 ]
 
 TARGET_LABELS = [

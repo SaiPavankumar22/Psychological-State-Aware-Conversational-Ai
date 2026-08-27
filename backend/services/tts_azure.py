@@ -38,6 +38,32 @@ AVAILABLE_VOICES = [
     "en-US-BrianMultilingualNeural",
 ]
 
+# Per-voice supported styles (Azure Neural TTS)
+# Only styles in this list will be used; others fall back to "assistant"
+_VOICE_STYLES: Dict[str, List[str]] = {
+    "en-IN-KavyaNeural":      ["assistant", "chat", "empathetic", "friendly", "serious", "cheerful"],
+    "en-IN-AnanyaNeural":      ["assistant", "chat", "empathetic", "friendly", "serious", "cheerful"],
+    "en-IN-AashiNeural":       ["assistant", "chat", "empathetic", "friendly", "serious", "cheerful"],
+    "en-US-AvaMultilingualNeural":  ["assistant", "chat", "empathetic", "friendly", "serious", "cheerful", "customerservice", "newscast-formal"],
+    "en-US-AndrewMultilingualNeural":["assistant", "chat", "empathetic", "friendly", "serious", "cheerful", "customerservice", "newscast-formal"],
+    "en-US-EmmaMultilingualNeural": ["assistant", "chat", "empathetic", "friendly", "serious", "cheerful", "customerservice", "newscast-formal"],
+    "en-US-BrianMultilingualNeural":["assistant", "chat", "empathetic", "friendly", "serious", "cheerful", "customerservice", "newscast-formal"],
+}
+
+# Fallback style for any unsupported style on any voice
+_STYLE_FALLBACK: Dict[str, str] = {
+    "calm":            "empathetic",
+    "newscast-casual": "newscast-formal",
+    "newscast":        "newscast-formal",
+    "assistant":       "assistant",
+    "empathetic":      "empathetic",
+    "friendly":        "friendly",
+    "cheerful":        "cheerful",
+    "serious":         "serious",
+    "chat":            "chat",
+    "customerservice": "customerservice",
+}
+
 AUDIO_FORMAT = speechsdk.SpeechSynthesisOutputFormat.Riff16Khz16BitMonoPcm
 
 
@@ -171,8 +197,18 @@ _STYLE_MATRIX: Dict[Tuple[str, str], str] = {
 }
 
 
-def _resolve_style(mode: str, ctx: str) -> str:
-    return _STYLE_MATRIX.get((mode, ctx), _STYLE_MATRIX.get((mode, "neutral"), "assistant"))
+def _resolve_style(mode: str, ctx: str, voice_name: str = "") -> str:
+    raw_style = _STYLE_MATRIX.get((mode, ctx), _STYLE_MATRIX.get((mode, "neutral"), "assistant"))
+    
+    # Validate style against the voice's supported styles
+    if voice_name:
+        supported = _VOICE_STYLES.get(voice_name, [])
+        if raw_style not in supported:
+            # Try the fallback map, then fall back to "assistant"
+            raw_style = _STYLE_FALLBACK.get(raw_style, "assistant")
+            if raw_style not in supported:
+                raw_style = "assistant"
+    return raw_style
 
 
 # =====================================================
@@ -211,9 +247,9 @@ class TTSController:
     """
 
     # Perceptual JND thresholds — changes below these are inaudible
-    JND_RATE    = 4    # % points
-    JND_PITCH   = 2    # % points
-    JND_DEGREE  = 0.10
+    JND_RATE    = 2    # % points (lowered for more responsive adaptation)
+    JND_PITCH   = 1    # % points (lowered for more responsive adaptation)
+    JND_DEGREE  = 0.05
 
     def __init__(self):
         # --- Smoothed current params ---
@@ -224,14 +260,14 @@ class TTSController:
         self.current_volume     = "medium"
         self.current_mode       = "neutral"
 
-        # --- Hysteresis gates ---
-        self.stress_gate    = HysteresisController(0.30, 0.60, dwell=4.0)
-        self.arousal_gate   = HysteresisController(0.25, 0.55, dwell=4.0)
-        self.valence_gate   = HysteresisController(-0.25, 0.30, dwell=4.0)  # positive?
-        self.support_gate   = HysteresisController(0.35, 0.55, dwell=5.0)   # support/sad mode
+        # --- Hysteresis gates (reduced dwell for faster adaptation) ---
+        self.stress_gate    = HysteresisController(0.30, 0.60, dwell=2.0)
+        self.arousal_gate   = HysteresisController(0.25, 0.55, dwell=2.0)
+        self.valence_gate   = HysteresisController(-0.25, 0.30, dwell=2.0)
+        self.support_gate   = HysteresisController(0.35, 0.55, dwell=2.5)
 
         # --- Exponential smoothing ---
-        self.alpha = 0.65   # Higher = more responsive
+        self.alpha = 0.75   # Higher = more responsive to state changes
 
         # --- Style history for stability ---
         self._style_queue: List[str] = []
@@ -245,6 +281,7 @@ class TTSController:
         self,
         adaptive_state: Dict,
         response_text: str = "",
+        voice_name: str = "",
     ) -> Dict:
         """
         Compute SSML-ready TTS parameters from the adaptive psychological state.
@@ -252,6 +289,7 @@ class TTSController:
         Args:
             adaptive_state: Output from EmotionalTrendTracker.get_adaptive_state()
             response_text:  The AI response text (for context detection)
+            voice_name:     Azure voice name (for style validation)
 
         Returns:
             dict with keys: style, styledegree, rate, pitch, volume
@@ -295,7 +333,7 @@ class TTSController:
         utt_ctx = detect_utterance_context(response_text) if response_text else "neutral"
 
         # --- Style ---
-        target_style = _resolve_style(interaction_mode, utt_ctx)
+        target_style = _resolve_style(interaction_mode, utt_ctx, voice_name=voice_name)
         self._push_style(target_style)
 
         # --- Prosody profile base ---
@@ -315,7 +353,7 @@ class TTSController:
             trend_rate = inst_rate
 
         raw_rate = int(iw * inst_rate + tw * trend_rate)
-        raw_rate = int(np.clip(raw_rate, -30, 25))
+        raw_rate = int(np.clip(raw_rate, -40, 35))
         # Apply only if above JND
         if abs(raw_rate - self.current_rate) >= self.JND_RATE:
             self.current_rate = int(self._smooth(self.current_rate, raw_rate))
@@ -330,7 +368,7 @@ class TTSController:
             trend_pitch = inst_pitch
 
         raw_pitch = int(iw * inst_pitch + tw * trend_pitch)
-        raw_pitch = int(np.clip(raw_pitch, -18, 18))
+        raw_pitch = int(np.clip(raw_pitch, -25, 25))
         if abs(raw_pitch - self.current_pitch) >= self.JND_PITCH:
             self.current_pitch = int(self._smooth(self.current_pitch, raw_pitch))
 
@@ -343,7 +381,7 @@ class TTSController:
         else:
             trend_deg = inst_deg
 
-        raw_deg = float(np.clip(iw * inst_deg + tw * trend_deg, 0.5, 2.0))
+        raw_deg = float(np.clip(iw * inst_deg + tw * trend_deg, 0.3, 2.0))
         if abs(raw_deg - self.current_degree) >= self.JND_DEGREE:
             self.current_degree = float(self._smooth(self.current_degree, raw_deg))
 

@@ -459,7 +459,7 @@ class QdrantMemoryStore:
         user_id:       str,
         query:         str,
         limit:         int   = 3,
-        min_importance:float = 0.40,   # Lowered from 0.5 so new memories appear
+        min_importance:float = 0.35,   # Lowered so more memories surface
     ) -> List[Dict[str, Any]]:
         """
         Retrieve relevant episodic memories via semantic search + composite scoring.

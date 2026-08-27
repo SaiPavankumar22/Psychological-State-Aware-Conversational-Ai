@@ -3,10 +3,10 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>AI Voice Assistant</title>
+  <title>MindVoice — AI Voice Assistant</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="/static/styles.css">
 </head>
 <body>
@@ -14,234 +14,268 @@
   <!-- ========== SIDEBAR ========== -->
   <aside class="sidebar">
     <div class="sidebar-header">
-      <button class="new-session-btn" onclick="createNewSession()">
-        <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="8" y1="2" x2="8" y2="14"/><line x1="2" y1="8" x2="14" y2="8"/></svg>
-        <span>New Chat</span>
+      <div class="brand">
+        <div class="brand-icon">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"/>
+            <path d="M19 10v2a7 7 0 0 1-14 0v-2"/>
+            <line x1="12" x2="12" y1="19" y2="22"/>
+          </svg>
+        </div>
+        <span class="brand-name">MindVoice</span>
+      </div>
+      <button class="new-chat-btn" onclick="createNewSession()" title="Start new conversation">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/>
+        </svg>
       </button>
     </div>
 
     <div class="session-search">
-      <div class="session-search-wrapper">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
-        <input type="text" id="sessionSearchInput" placeholder="Search conversations..." oninput="filterSessions()">
+      <div class="search-box">
+        <svg class="search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+        <input type="text" id="sessionSearchInput" placeholder="Search..." oninput="filterSessions()">
       </div>
     </div>
 
     <div class="session-list" id="sessionList">
-      <div class="session-empty" style="opacity:0.5;text-align:center;padding:24px 12px;font-size:12px;">
-        Loading sessions...
-      </div>
+      <div class="session-empty">No conversations yet</div>
     </div>
 
     <div class="sidebar-footer">
-      <button class="export-btn" onclick="exportConversation()" title="Export conversations as JSON">
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+      <button class="footer-btn" onclick="exportConversation()" title="Export all conversations">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
         Export
+      </button>
+      <button class="footer-btn" onclick="toggleDebugPanels()" title="Toggle debug view">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="3"/><path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42"/></svg>
+        Debug
       </button>
     </div>
   </aside>
 
   <!-- ========== MAIN CONTENT ========== -->
   <main class="main-content">
-    <div class="main-container">
+
+    <!-- Hero / Assistant Area -->
+    <section class="assistant-section">
 
       <!-- Header -->
       <header class="app-header">
-        <h1 class="app-title">AI Voice Assistant</h1>
-        <p class="app-subtitle">Psychologically Adaptive Conversation</p>
+        <h1 class="app-title">MindVoice</h1>
+        <p class="app-subtitle">Psychologically Adaptive AI Conversation</p>
       </header>
 
-      <!-- Voice Selector -->
-      <div class="voice-selector">
-        <label for="voiceSelect">Voice:</label>
-        <select id="voiceSelect">
-          <option value="en-IN-KavyaNeural">Kavya (Indian) — Default</option>
-          <option value="en-IN-AnanyaNeural">Ananya (Indian)</option>
-          <option value="en-IN-AashiNeural">Aashi (Indian)</option>
-          <option value="en-US-AvaMultilingualNeural">Ava Multilingual</option>
-          <option value="en-US-AndrewMultilingualNeural">Andrew Multilingual</option>
-          <option value="en-US-EmmaMultilingualNeural">Emma Multilingual</option>
-          <option value="en-US-BrianMultilingualNeural">Brian Multilingual</option>
-        </select>
-      </div>
-
-      <!-- Turn Counter -->
-      <div class="turn-info">
-        <span class="turn-counter">Turn <span id="turnCount">0</span></span>
-        <span id="modeBadge" class="mode-badge mode-instant">Instant Mode</span>
-      </div>
-
-      <!-- Assistant Ring -->
-      <div class="ring-container">
-        <div id="assistantRing" class="assistant-ring">
-          <div class="mic-icon">🎙️</div>
+      <!-- Voice + Turn Info Row -->
+      <div class="controls-row">
+        <div class="voice-pill">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M15.54 8.46a5 5 0 0 1 0 7.07"/></svg>
+          <select id="voiceSelect">
+            <option value="en-IN-KavyaNeural">Kavya</option>
+            <option value="en-IN-AnanyaNeural">Ananya</option>
+            <option value="en-IN-AashiNeural">Aashi</option>
+            <option value="en-US-AvaMultilingualNeural">Ava</option>
+            <option value="en-US-AndrewMultilingualNeural">Andrew</option>
+            <option value="en-US-EmmaMultilingualNeural">Emma</option>
+            <option value="en-US-BrianMultilingualNeural">Brian</option>
+          </select>
         </div>
-        <div class="ring-pulse"></div>
-        <div class="waveform-bars">
-          <div class="waveform-bar"></div>
-          <div class="waveform-bar"></div>
-          <div class="waveform-bar"></div>
-          <div class="waveform-bar"></div>
-          <div class="waveform-bar"></div>
+        <div class="turn-pill">
+          <span>Turn <strong id="turnCount">0</strong></span>
+        </div>
+        <div class="mode-pill" id="modeBadge">
+          <span class="mode-dot"></span>
+          Instant
+        </div>
+      </div>
+
+      <!-- Mic Ring -->
+      <div class="ring-area">
+        <div class="ring-glow" id="ringGlow"></div>
+        <div id="assistantRing" class="ring">
+          <svg class="ring-icon" width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"/>
+            <path d="M19 10v2a7 7 0 0 1-14 0v-2"/>
+            <line x1="12" x2="12" y1="19" y2="22"/>
+          </svg>
+        </div>
+        <!-- Waveform visualization -->
+        <div class="waveform" id="waveform">
+          <div class="wave-bar"></div><div class="wave-bar"></div><div class="wave-bar"></div>
+          <div class="wave-bar"></div><div class="wave-bar"></div><div class="wave-bar"></div>
+          <div class="wave-bar"></div><div class="wave-bar"></div><div class="wave-bar"></div>
         </div>
       </div>
 
       <!-- Status -->
-      <div class="status" id="status">Ready to listen</div>
+      <div class="status-line" id="status">Ready to listen</div>
 
-      <!-- Controls -->
-      <div class="controls">
-        <button id="startBtn" class="btn btn-start">
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><path d="M12 14c1.66 0 3-1.34 3-3V5c0-1.66-1.34-3-3-3S9 3.34 9 5v6c0 1.66 1.34 3 3 3z"/><path d="M17 11c0 2.76-2.24 5-5 5s-5-2.24-5-5H5c0 3.53 2.61 6.43 6 6.92V21h2v-3.08c3.39-.49 6-3.39 6-6.92h-2z"/></svg>
-          Start Speaking
+      <!-- Action Buttons -->
+      <div class="action-buttons">
+        <button id="startBtn" class="action-btn start" aria-label="Start recording">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><path d="M12 14c1.66 0 3-1.34 3-3V5c0-1.66-1.34-3-3-3S9 3.34 9 5v6c0 1.66 1.34 3 3 3z"/><path d="M17 11c0 2.76-2.24 5-5 5s-5-2.24-5-5H5c0 3.53 2.61 6.43 6 6.92V21h2v-3.08c3.39-.49 6-3.39 6-6.92h-2z"/></svg>
+          Start
         </button>
-        <button id="stopBtn" class="btn btn-stop" disabled>
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>
-          Stop Speaking
+        <button id="stopBtn" class="action-btn stop" disabled aria-label="Stop recording">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>
+          Stop
         </button>
       </div>
 
       <!-- Status Messages -->
-      <div id="errorBox" class="status-message hidden"></div>
+      <div id="errorBox" class="toast hidden"></div>
 
       <!-- Thinking Indicator -->
-      <div id="thinkingIndicator" class="thinking-indicator hidden">
-        <div class="thinking-dots"><span></span><span></span><span></span></div>
-        <span id="thinkingText" class="thinking-label">Thinking...</span>
+      <div id="thinkingIndicator" class="thinking-bar hidden">
+        <div class="thinking-pulse"></div>
+        <span id="thinkingText">Thinking...</span>
       </div>
 
-      <!-- Transcript Card -->
-      <div class="message-card hidden" id="transcriptBox">
-        <div class="message-card-label user">You said</div>
-        <div class="message-card-text" id="transcript"></div>
+    </section>
+
+    <!-- Conversation Cards -->
+    <section class="conversation-area">
+      <div class="message-card user-card hidden" id="transcriptBox">
+        <div class="card-header">
+          <div class="card-avatar you">You</div>
+          <span class="card-label">Transcript</span>
+        </div>
+        <div class="card-body" id="transcript"></div>
       </div>
 
-      <!-- Response Card -->
-      <div class="message-card hidden" id="responseBox">
-        <div class="message-card-label assistant">AI responds</div>
-        <div class="message-card-text" id="response"></div>
+      <div class="message-card ai-card hidden" id="responseBox">
+        <div class="card-header">
+          <div class="card-avatar ai">AI</div>
+          <span class="card-label">Response</span>
+        </div>
+        <div class="card-body" id="response"></div>
       </div>
+    </section>
 
-      <!-- Emotional State -->
-      <div class="state-grid hidden" id="stateInfo">
-        <div class="state-card">
-          <span class="state-label">Emotion</span>
-          <span class="state-value" id="valence">—</span>
+    <!-- Emotional State -->
+    <section class="emotion-section hidden" id="stateInfo">
+      <div class="emotion-grid">
+        <div class="emotion-card">
+          <div class="emotion-ring">
+            <svg viewBox="0 0 36 36"><circle class="bg" cx="18" cy="18" r="16"/><circle class="fill" id="valenceRing" cx="18" cy="18" r="16"/></svg>
+            <span class="emotion-emoji" id="valenceEmoji">😐</span>
+          </div>
+          <div class="emotion-name">Emotion</div>
+          <div class="emotion-val" id="valence">—</div>
         </div>
-        <div class="state-card">
-          <span class="state-label">Energy</span>
-          <span class="state-value" id="arousal">—</span>
+        <div class="emotion-card">
+          <div class="emotion-ring">
+            <svg viewBox="0 0 36 36"><circle class="bg" cx="18" cy="18" r="16"/><circle class="fill" id="arousalRing" cx="18" cy="18" r="16"/></svg>
+            <span class="emotion-emoji" id="arousalEmoji">⚡</span>
+          </div>
+          <div class="emotion-name">Energy</div>
+          <div class="emotion-val" id="arousal">—</div>
         </div>
-        <div class="state-card">
-          <span class="state-label">Clarity</span>
-          <span class="state-value" id="clarity">—</span>
+        <div class="emotion-card">
+          <div class="emotion-ring">
+            <svg viewBox="0 0 36 36"><circle class="bg" cx="18" cy="18" r="16"/><circle class="fill" id="clarityRing" cx="18" cy="18" r="16"/></svg>
+            <span class="emotion-emoji" id="clarityEmoji">💡</span>
+          </div>
+          <div class="emotion-name">Clarity</div>
+          <div class="emotion-val" id="clarity">—</div>
         </div>
-        <div class="state-card">
-          <span class="state-label">Stress</span>
-          <span class="state-value" id="stress">—</span>
-        </div>
-      </div>
-
-      <!-- Debug Panels -->
-      <div class="debug-panels">
-
-        <!-- Model Outputs -->
-        <div class="debug-panel">
-          <div class="panel-title">🤖 Model Outputs</div>
-
-          <div class="section-header">ASR (Whisper)</div>
-          <div id="modelASR">
-            <div class="data-row"><span class="data-label">Transcript:</span><span class="data-value">—</span></div>
-            <div class="data-row"><span class="data-label">Latency:</span><span class="data-value">—</span></div>
+        <div class="emotion-card">
+          <div class="emotion-ring">
+            <svg viewBox="0 0 36 36"><circle class="bg" cx="18" cy="18" r="16"/><circle class="fill" id="stressRing" cx="18" cy="18" r="16"/></svg>
+            <span class="emotion-emoji" id="stressEmoji">😌</span>
           </div>
-
-          <div class="section-header">Text Emotion (RoBERTa)</div>
-          <div id="modelTextEmotion">
-            <div class="data-row"><span class="data-label">No data yet</span></div>
-          </div>
-
-          <div class="section-header">SER (Wav2Vec2)</div>
-          <div id="modelSER">
-            <div class="data-row"><span class="data-label">Angry:</span><span class="data-value">0.00</span></div>
-            <div class="data-row"><span class="data-label">Happy:</span><span class="data-value">0.00</span></div>
-            <div class="data-row"><span class="data-label">Neutral:</span><span class="data-value">0.00</span></div>
-            <div class="data-row"><span class="data-label">Sad:</span><span class="data-value">0.00</span></div>
-          </div>
-
-          <div class="section-header">AST (Audio Events)</div>
-          <div id="modelAST">
-            <div class="data-row"><span class="data-label">No events detected</span></div>
-          </div>
-
-          <div class="section-header">Acoustic Features</div>
-          <div id="modelAcoustic">
-            <div class="data-row"><span class="data-label">Speech Rate:</span><span class="data-value">0.00 WPS</span></div>
-            <div class="data-row"><span class="data-label">Pause Duration:</span><span class="data-value">0.00 s</span></div>
-            <div class="data-row"><span class="data-label">Jitter:</span><span class="data-value">0.000</span></div>
-          </div>
-
-          <div class="section-header">Fusion Output</div>
-          <div id="modelFusion">
-            <div class="data-row"><span class="data-label">Valence:</span><span class="data-value">0.00</span></div>
-            <div class="data-row"><span class="data-label">Arousal:</span><span class="data-value">0.00</span></div>
-            <div class="data-row"><span class="data-label">Stress:</span><span class="data-value">0.00</span></div>
-            <div class="data-row"><span class="data-label">Clarity:</span><span class="data-value">0.00</span></div>
-          </div>
-        </div>
-
-        <!-- Memory & State -->
-        <div class="debug-panel">
-          <div class="panel-title">🧠 Memory & State</div>
-
-          <div class="section-header">Session Info</div>
-          <div class="data-row"><span class="data-label">Session ID:</span><span class="data-value" id="memSessionId">—</span></div>
-          <div class="data-row"><span class="data-label">Turn Count:</span><span class="data-value" id="memTurnCount">0</span></div>
-
-          <div class="section-header">Topic Tracking</div>
-          <div class="data-row"><span class="data-label">Current Topic:</span><span class="data-value" id="memTopic">general</span></div>
-          <div class="data-row"><span class="data-label">Confidence:</span><span class="data-value" id="memTopicConf">0%</span></div>
-
-          <div class="section-header">Emotional Trends</div>
-          <div class="sparkline-container" id="sparklineContainer" style="display:none;">
-            <div class="sparkline-label">Valence / Stress over turns</div>
-            <canvas id="emotionSparkline" width="400" height="60"></canvas>
-          </div>
-          <div class="data-row"><span class="data-label">Mode:</span><span class="data-value" id="memMode">instant</span></div>
-          <div class="data-row"><span class="data-label">Confidence:</span><span class="data-value" id="memModeConf">0%</span></div>
-          <div class="data-row">
-            <span class="data-label">Valence:</span>
-            <span><span class="data-value" id="memValence">0.00</span><span id="memValenceTrend" class="trend-indicator">→</span></span>
-          </div>
-          <div class="data-row">
-            <span class="data-label">Arousal:</span>
-            <span><span class="data-value" id="memArousal">0.00</span><span id="memArousalTrend" class="trend-indicator">→</span></span>
-          </div>
-          <div class="data-row">
-            <span class="data-label">Stress:</span>
-            <span><span class="data-value" id="memStress">0.00</span><span id="memStressTrend" class="trend-indicator">→</span></span>
-          </div>
-          <div class="data-row">
-            <span class="data-label">Clarity:</span>
-            <span><span class="data-value" id="memClarity">0.00</span><span id="memClarityTrend" class="trend-indicator">→</span></span>
-          </div>
-
-          <div class="section-header">Recent Turns</div>
-          <div id="memRecentTurns">
-            <div class="data-row"><span class="data-label">No turns yet</span></div>
-          </div>
-
-          <div class="section-header">Dialogue State</div>
-          <div class="data-row"><span class="data-label">Recent Intents:</span><span class="data-value" id="memIntents">—</span></div>
-          <div class="data-row"><span class="data-label">Coherence:</span><span class="data-value" id="memCoherence">1.00</span></div>
-
-          <div class="section-header">Long-Term Memory (Qdrant)</div>
-          <div class="data-row"><span class="data-label">Episodic:</span><span class="data-value" id="memEpisodic">0</span></div>
-          <div class="data-row"><span class="data-label">Semantic:</span><span class="data-value" id="memSemantic">0</span></div>
-          <div class="data-row"><span class="data-label">Last Retrieval:</span><span class="data-value" id="memLastRetrieval" style="font-size:10px;">N/A</span></div>
+          <div class="emotion-name">Stress</div>
+          <div class="emotion-val" id="stress">—</div>
         </div>
       </div>
+    </section>
 
-    </div><!-- /main-container -->
+    <!-- Debug Panels (collapsible) -->
+    <section class="debug-section" id="debugSection">
+      <div class="debug-grid">
+
+        <div class="debug-card">
+          <button class="debug-toggle" onclick="this.parentElement.classList.toggle('open')">
+            <span>🤖 Model Outputs</span>
+            <svg class="chevron" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"/></svg>
+          </button>
+          <div class="debug-body">
+            <div class="debug-group">
+              <div class="debug-group-title">ASR (Whisper)</div>
+              <div id="modelASR"><div class="debug-row"><span>—</span></div></div>
+            </div>
+            <div class="debug-group">
+              <div class="debug-group-title">Text Emotion (RoBERTa)</div>
+              <div id="modelTextEmotion"><div class="debug-row"><span>No data</span></div></div>
+            </div>
+            <div class="debug-group">
+              <div class="debug-group-title">Speech Emotion (Wav2Vec2)</div>
+              <div id="modelSER"><div class="debug-row"><span>—</span></div></div>
+            </div>
+            <div class="debug-group">
+              <div class="debug-group-title">Audio Events (AST)</div>
+              <div id="modelAST"><div class="debug-row"><span>No events</span></div></div>
+            </div>
+            <div class="debug-group">
+              <div class="debug-group-title">Acoustic Features</div>
+              <div id="modelAcoustic"><div class="debug-row"><span>—</span></div></div>
+            </div>
+            <div class="debug-group">
+              <div class="debug-group-title">Fusion Output</div>
+              <div id="modelFusion"><div class="debug-row"><span>—</span></div></div>
+            </div>
+          </div>
+        </div>
+
+        <div class="debug-card">
+          <button class="debug-toggle" onclick="this.parentElement.classList.toggle('open')">
+            <span>🧠 Memory & State</span>
+            <svg class="chevron" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"/></svg>
+          </button>
+          <div class="debug-body">
+            <div class="debug-group">
+              <div class="debug-group-title">Session</div>
+              <div class="debug-row"><span class="dl">ID</span><span class="dv" id="memSessionId">—</span></div>
+              <div class="debug-row"><span class="dl">Turns</span><span class="dv" id="memTurnCount">0</span></div>
+            </div>
+            <div class="debug-group">
+              <div class="debug-group-title">Topic</div>
+              <div class="debug-row"><span class="dl">Topic</span><span class="dv" id="memTopic">general</span></div>
+              <div class="debug-row"><span class="dl">Confidence</span><span class="dv" id="memTopicConf">0%</span></div>
+            </div>
+            <div class="debug-group">
+              <div class="debug-group-title">Emotional Trends</div>
+              <div class="sparkline-wrap" id="sparklineContainer" style="display:none;">
+                <canvas id="emotionSparkline" width="400" height="50"></canvas>
+              </div>
+              <div class="debug-row"><span class="dl">Mode</span><span class="dv" id="memMode">instant</span></div>
+              <div class="debug-row"><span class="dl">Confidence</span><span class="dv" id="memModeConf">0%</span></div>
+              <div class="debug-row"><span class="dl">Valence</span><span><span class="dv" id="memValence">0.00</span><span id="memValenceTrend" class="trend">→</span></span></div>
+              <div class="debug-row"><span class="dl">Arousal</span><span><span class="dv" id="memArousal">0.00</span><span id="memArousalTrend" class="trend">→</span></span></div>
+              <div class="debug-row"><span class="dl">Stress</span><span><span class="dv" id="memStress">0.00</span><span id="memStressTrend" class="trend">→</span></span></div>
+              <div class="debug-row"><span class="dl">Clarity</span><span><span class="dv" id="memClarity">0.00</span><span id="memClarityTrend" class="trend">→</span></span></div>
+            </div>
+            <div class="debug-group">
+              <div class="debug-group-title">Recent Turns</div>
+              <div id="memRecentTurns"><div class="debug-row"><span>No turns yet</span></div></div>
+            </div>
+            <div class="debug-group">
+              <div class="debug-group-title">Dialogue</div>
+              <div class="debug-row"><span class="dl">Intents</span><span class="dv" id="memIntents">—</span></div>
+              <div class="debug-row"><span class="dl">Coherence</span><span class="dv" id="memCoherence">1.00</span></div>
+            </div>
+            <div class="debug-group">
+              <div class="debug-group-title">Long-Term Memory</div>
+              <div class="debug-row"><span class="dl">Episodic</span><span class="dv" id="memEpisodic">0</span></div>
+              <div class="debug-row"><span class="dl">Semantic</span><span class="dv" id="memSemantic">0</span></div>
+              <div class="debug-row"><span class="dl">Last Retrieval</span><span class="dv" id="memLastRetrieval" style="font-size:10px">N/A</span></div>
+            </div>
+          </div>
+        </div>
+
+      </div>
+    </section>
+
   </main>
 
   <script src="/static/app.js"></script>
