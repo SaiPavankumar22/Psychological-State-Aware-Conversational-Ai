@@ -1,1494 +1,249 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>AI Voice Assistant</title>
-    <style>
-        * {
-            margin: 0;
-            padding: 0;
-            box-sizing: border-box;
-        }
-        
-        body {
-            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            min-height: 100vh;
-            color: white;
-            padding: 0;
-            margin: 0;
-            overflow-x: hidden;
-            display: flex;
-        }
-        
-        /* ===== SESSION SIDEBAR (ChatGPT-like) ===== */
-        .sidebar {
-            width: 260px;
-            background: rgba(0, 0, 0, 0.4);
-            backdrop-filter: blur(10px);
-            padding: 20px;
-            display: flex;
-            flex-direction: column;
-            gap: 15px;
-            height: 100vh;
-            overflow-y: auto;
-            border-right: 1px solid rgba(255, 255, 255, 0.1);
-        }
-        
-        .sidebar::-webkit-scrollbar {
-            width: 6px;
-        }
-        
-        .sidebar::-webkit-scrollbar-thumb {
-            background: rgba(255, 255, 255, 0.2);
-            border-radius: 3px;
-        }
-        
-        .new-session-btn {
-            background: rgba(255, 255, 255, 0.2);
-            border: 2px solid rgba(255, 255, 255, 0.3);
-            color: white;
-            padding: 12px 20px;
-            border-radius: 8px;
-            cursor: pointer;
-            font-size: 14px;
-            font-weight: 600;
-            transition: all 0.3s;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            gap: 8px;
-        }
-        
-        .new-session-btn:hover {
-            background: rgba(255, 255, 255, 0.3);
-            transform: translateY(-2px);
-        }
-        
-        .session-list {
-            display: flex;
-            flex-direction: column;
-            gap: 8px;
-            flex: 1;
-        }
-        
-        .session-item {
-            background: rgba(255, 255, 255, 0.1);
-            padding: 12px;
-            border-radius: 8px;
-            cursor: pointer;
-            transition: all 0.2s;
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            gap: 8px;
-        }
-        
-        .session-item:hover {
-            background: rgba(255, 255, 255, 0.2);
-            transform: translateX(4px);
-        }
-        
-        .session-item.active {
-            background: rgba(255, 255, 255, 0.3);
-            border-left: 3px solid #fff;
-        }
-        
-        .session-info {
-            flex: 1;
-            text-align: left;
-            overflow: hidden;
-        }
-        
-        .session-title {
-            font-size: 13px;
-            font-weight: 500;
-            white-space: nowrap;
-            overflow: hidden;
-            text-overflow: ellipsis;
-            margin-bottom: 4px;
-        }
-        
-        .session-meta {
-            font-size: 10px;
-            opacity: 0.7;
-        }
-        
-        .delete-session-btn {
-            background: rgba(255, 0, 0, 0.3);
-            border: none;
-            color: white;
-            padding: 6px 10px;
-            border-radius: 4px;
-            cursor: pointer;
-            font-size: 12px;
-            transition: all 0.2s;
-        }
-        
-        .delete-session-btn:hover {
-            background: rgba(255, 0, 0, 0.6);
-        }
-        
-        .main-content {
-            flex: 1;
-            padding: 20px;
-            overflow-y: auto;
-        }
-        
-        .main-container {
-            text-align: center;
-            max-width: 900px;
-            margin: 0 auto;
-            padding: 20px;
-        }
-        
-        .debug-panels {
-            display: grid;
-            grid-template-columns: 1fr 1fr;
-            gap: 15px;
-            margin-top: 30px;
-            max-width: 1400px;
-            margin-left: auto;
-            margin-right: auto;
-        }
-        
-        .debug-panel {
-            background: rgba(0, 0, 0, 0.3);
-            backdrop-filter: blur(10px);
-            border-radius: 15px;
-            padding: 20px;
-            max-height: 600px;
-            overflow-y: auto;
-        }
-        
-        .debug-panel::-webkit-scrollbar {
-            width: 8px;
-        }
-        
-        .debug-panel::-webkit-scrollbar-track {
-            background: rgba(255, 255, 255, 0.1);
-            border-radius: 10px;
-        }
-        
-        .debug-panel::-webkit-scrollbar-thumb {
-            background: rgba(255, 255, 255, 0.3);
-            border-radius: 10px;
-        }
-        
-        .debug-panel::-webkit-scrollbar-thumb:hover {
-            background: rgba(255, 255, 255, 0.5);
-        }
-        
-        h1 {
-            font-size: 48px;
-            margin-bottom: 10px;
-            text-shadow: 2px 2px 4px rgba(0,0,0,0.3);
-        }
-        
-        .subtitle {
-            font-size: 18px;
-            opacity: 0.9;
-            margin-bottom: 30px;
-        }
-        
-        .controls {
-            display: flex;
-            justify-content: center;
-            gap: 20px;
-            margin: 30px 0;
-        }
-        
-        .btn {
-            padding: 15px 40px;
-            font-size: 18px;
-            border: none;
-            border-radius: 50px;
-            cursor: pointer;
-            transition: all 0.3s ease;
-            font-weight: 600;
-            box-shadow: 0 4px 6px rgba(0,0,0,0.2);
-        }
-        
-        .btn:hover {
-            transform: translateY(-2px);
-            box-shadow: 0 6px 12px rgba(0,0,0,0.3);
-        }
-        
-        .btn:disabled {
-            opacity: 0.5;
-            cursor: not-allowed;
-            transform: none;
-        }
-        
-        .btn-start {
-            background: #4ade80;
-            color: #1e293b;
-        }
-        
-        .btn-stop {
-            background: #ef4444;
-            color: white;
-        }
-        
-        .assistant-ring {
-            width: 200px;
-            height: 200px;
-            margin: 40px auto;
-            border-radius: 50%;
-            background: rgba(255, 255, 255, 0.1);
-            border: 4px solid rgba(255, 255, 255, 0.3);
-            display: flex;
-            justify-content: center;
-            align-items: center;
-            transition: all 0.3s ease;
-        }
-        
-        .assistant-ring.listening {
-            animation: pulse 1.5s infinite;
-            background: rgba(74, 222, 128, 0.2);
-            border-color: #4ade80;
-            box-shadow: 0 0 30px rgba(74, 222, 128, 0.6);
-        }
-        
-        .assistant-ring.processing {
-            border-color: #fbbf24;
-            box-shadow: 0 0 30px rgba(251, 191, 36, 0.6);
-            animation: spin 2s linear infinite;
-        }
-        
-        .assistant-ring.speaking {
-            border-color: #60a5fa;
-            animation: speak 0.5s infinite;
-        }
-        
-        @keyframes pulse {
-            0%, 100% { transform: scale(1); }
-            50% { transform: scale(1.1); }
-        }
-        
-        @keyframes spin {
-            from { transform: rotate(0deg); }
-            to { transform: rotate(360deg); }
-        }
-        
-        @keyframes speak {
-            0%, 100% { box-shadow: 0 0 20px rgba(96, 165, 250, 0.4); }
-            50% { box-shadow: 0 0 40px rgba(96, 165, 250, 0.8); }
-        }
-        
-        .mic-icon {
-            font-size: 80px;
-        }
-        
-        .status {
-            font-size: 24px;
-            margin: 20px 0;
-            min-height: 30px;
-            font-weight: 500;
-        }
-        
-        .turn-info {
-            background: rgba(255, 255, 255, 0.1);
-            padding: 10px 20px;
-            border-radius: 20px;
-            display: inline-block;
-            margin: 10px 0;
-            font-size: 14px;
-        }
-        
-        .transcript-box, .response-box {
-            background: rgba(255, 255, 255, 0.1);
-            padding: 20px;
-            border-radius: 10px;
-            margin: 20px 0;
-            min-height: 80px;
-            backdrop-filter: blur(10px);
-            text-align: left;
-        }
-        
-        .response-box {
-            background: rgba(255, 255, 255, 0.15);
-        }
-        
-        .state-info {
-            display: grid;
-            grid-template-columns: repeat(2, 1fr);
-            gap: 10px;
-            margin-top: 20px;
-        }
-        
-        .state-item {
-            background: rgba(255, 255, 255, 0.1);
-            padding: 15px;
-            border-radius: 8px;
-        }
-        
-        .state-label {
-            font-weight: bold;
-            display: block;
-            margin-bottom: 8px;
-            font-size: 12px;
-            opacity: 0.8;
-        }
-        
-        .state-value {
-            font-size: 18px;
-        }
-        
-        .mode-badge {
-            display: inline-block;
-            padding: 5px 15px;
-            border-radius: 20px;
-            font-size: 12px;
-            font-weight: 600;
-            margin-left: 10px;
-        }
-        
-        .mode-instant {
-            background: #fbbf24;
-            color: #1e293b;
-        }
-        
-        .mode-trend {
-            background: #60a5fa;
-            color: #1e293b;
-        }
-        
-        .error {
-            background: rgba(239, 68, 68, 0.2);
-            color: #fecaca;
-            padding: 15px;
-            border-radius: 10px;
-            margin: 20px 0;
-            border: 1px solid #ef4444;
-        }
-        
-        .success-status {
-            background: rgba(74, 222, 128, 0.2);
-            color: #bbf7d0;
-            padding: 15px;
-            border-radius: 10px;
-            margin: 20px 0;
-            border: 1px solid #4ade80;
-        }
-        
-        .info-status {
-            background: rgba(96, 165, 250, 0.2);
-            color: #bfdbfe;
-            padding: 15px;
-            border-radius: 10px;
-            margin: 20px 0;
-            border: 1px solid #60a5fa;
-        }
-        
-        .hidden {
-            display: none;
-        }
-        
-        /* Voice Selector */
-        .voice-selector {
-            margin: 20px 0;
-        }
-        
-        .voice-selector label {
-            display: block;
-            margin-bottom: 8px;
-            font-size: 14px;
-            opacity: 0.9;
-        }
-        
-        .voice-selector select {
-            padding: 10px 15px;
-            font-size: 14px;
-            border-radius: 10px;
-            border: 2px solid rgba(255, 255, 255, 0.3);
-            background: rgba(255, 255, 255, 0.1);
-            color: white;
-            cursor: pointer;
-            width: 100%;
-            max-width: 350px;
-        }
-        
-        .voice-selector select option {
-            background: #1e293b;
-            color: white;
-        }
-        
-        /* Debug Panel Headers */
-        .panel-title {
-            font-size: 20px;
-            font-weight: 700;
-            margin-bottom: 15px;
-            text-align: center;
-            border-bottom: 2px solid rgba(255, 255, 255, 0.3);
-            padding-bottom: 10px;
-            color: #fbbf24;
-        }
-        
-        .section-header {
-            font-size: 14px;
-            font-weight: 600;
-            margin: 15px 0 10px 0;
-            color: #60a5fa;
-            border-left: 3px solid #60a5fa;
-            padding-left: 10px;
-        }
-        
-        .data-row {
-            font-size: 12px;
-            line-height: 1.8;
-            padding: 6px 10px;
-            background: rgba(255, 255, 255, 0.05);
-            margin-bottom: 4px;
-            border-radius: 5px;
-            display: flex;
-            justify-content: space-between;
-        }
-        
-        .data-row:hover {
-            background: rgba(255, 255, 255, 0.1);
-        }
-        
-        .data-label {
-            color: rgba(255, 255, 255, 0.7);
-            font-weight: 500;
-        }
-        
-        .data-value {
-            color: #fff;
-            font-weight: 600;
-            font-family: 'Courier New', monospace;
-        }
-        
-        .emotion-bar {
-            height: 8px;
-            background: rgba(255, 255, 255, 0.2);
-            border-radius: 4px;
-            overflow: hidden;
-            margin-top: 4px;
-        }
-        
-        .emotion-bar-fill {
-            height: 100%;
-            background: linear-gradient(90deg, #4ade80, #fbbf24, #ef4444);
-            transition: width 0.3s ease;
-        }
-        
-        .trend-indicator {
-            display: inline-block;
-            margin-left: 8px;
-            font-weight: bold;
-        }
-        
-        .trend-up {
-            color: #ef4444;
-        }
-        
-        .trend-down {
-            color: #4ade80;
-        }
-        
-        .trend-stable {
-            color: #fbbf24;
-        }
-        
-        @media (max-width: 1200px) {
-            .debug-panels {
-                grid-template-columns: 1fr;
-            }
-            
-            .debug-panel {
-                max-height: 400px;
-            }
-        }
-        
-        @media (max-width: 768px) {
-            body {
-                flex-direction: column;
-            }
-            
-            .sidebar {
-                width: 100%;
-                height: auto;
-                max-height: 200px;
-                border-right: none;
-                border-bottom: 1px solid rgba(255, 255, 255, 0.1);
-            }
-            
-            .main-content {
-                padding: 10px;
-            }
-        }
-    </style>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AI Voice Assistant</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/static/styles.css">
 </head>
 <body>
-    <!-- SESSION SIDEBAR -->
-    <div class="sidebar">
-        <button class="new-session-btn" onclick="createNewSession()">
-            <span>✨</span>
-            <span>New Chat</span>
-        </button>
-        <div class="session-list" id="sessionList">
-            <div style="opacity: 0.6; font-size: 12px; text-align: center; padding: 20px;">
-                Loading sessions...
-            </div>
-        </div>
+
+  <!-- ========== SIDEBAR ========== -->
+  <aside class="sidebar">
+    <div class="sidebar-header">
+      <button class="new-session-btn" onclick="createNewSession()">
+        <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="8" y1="2" x2="8" y2="14"/><line x1="2" y1="8" x2="14" y2="8"/></svg>
+        <span>New Chat</span>
+      </button>
     </div>
-    
-    <!-- MAIN CONTENT -->
-    <div class="main-content">
-        <div class="main-container">
-            <h1>🎙️ AI Voice Assistant</h1>
-            <p class="subtitle">Psychologically Adaptive Conversation</p>
-        
-        <!-- Voice Selector -->
-        <div class="voice-selector">
-            <label for="voiceSelect">🎵 Select Voice:</label>
-            <select id="voiceSelect">
-                <option value="en-US-AvaMultilingualNeural">Ava Multilingual</option>
-                <option value="en-US-AndrewMultilingualNeural">Andrew Multilingual</option>
-                <option value="en-US-EmmaMultilingualNeural">Emma Multilingual</option>
-                <option value="en-US-BrianMultilingualNeural">Brian Multilingual</option>
-                <option value="en-IN-KavyaNeural">Kavya (Indian) (Default)</option>
-                <option value="en-IN-AnanyaNeural">Ananya (Indian)</option>
-                <option value="en-IN-AashiNeural">Aashi (Indian)</option>
-            </select>
-        </div>
-        
-        <div class="turn-info">
-            Turn <span id="turnCount">0</span> 
-            <span id="modeBadge" class="mode-badge mode-instant">Instant Mode</span>
-        </div>
-        
+
+    <div class="session-search">
+      <div class="session-search-wrapper">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+        <input type="text" id="sessionSearchInput" placeholder="Search conversations..." oninput="filterSessions()">
+      </div>
+    </div>
+
+    <div class="session-list" id="sessionList">
+      <div class="session-empty" style="opacity:0.5;text-align:center;padding:24px 12px;font-size:12px;">
+        Loading sessions...
+      </div>
+    </div>
+
+    <div class="sidebar-footer">
+      <button class="export-btn" onclick="exportConversation()" title="Export conversations as JSON">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+        Export
+      </button>
+    </div>
+  </aside>
+
+  <!-- ========== MAIN CONTENT ========== -->
+  <main class="main-content">
+    <div class="main-container">
+
+      <!-- Header -->
+      <header class="app-header">
+        <h1 class="app-title">AI Voice Assistant</h1>
+        <p class="app-subtitle">Psychologically Adaptive Conversation</p>
+      </header>
+
+      <!-- Voice Selector -->
+      <div class="voice-selector">
+        <label for="voiceSelect">Voice:</label>
+        <select id="voiceSelect">
+          <option value="en-IN-KavyaNeural">Kavya (Indian) — Default</option>
+          <option value="en-IN-AnanyaNeural">Ananya (Indian)</option>
+          <option value="en-IN-AashiNeural">Aashi (Indian)</option>
+          <option value="en-US-AvaMultilingualNeural">Ava Multilingual</option>
+          <option value="en-US-AndrewMultilingualNeural">Andrew Multilingual</option>
+          <option value="en-US-EmmaMultilingualNeural">Emma Multilingual</option>
+          <option value="en-US-BrianMultilingualNeural">Brian Multilingual</option>
+        </select>
+      </div>
+
+      <!-- Turn Counter -->
+      <div class="turn-info">
+        <span class="turn-counter">Turn <span id="turnCount">0</span></span>
+        <span id="modeBadge" class="mode-badge mode-instant">Instant Mode</span>
+      </div>
+
+      <!-- Assistant Ring -->
+      <div class="ring-container">
         <div id="assistantRing" class="assistant-ring">
-            <div class="mic-icon">🎤</div>
+          <div class="mic-icon">🎙️</div>
         </div>
-        
-        <div class="status" id="status">Ready to listen</div>
-        
-        <div class="controls">
-            <button id="startBtn" class="btn btn-start">Start Speaking</button>
-            <button id="stopBtn" class="btn btn-stop" disabled>Stop Speaking</button>
+        <div class="ring-pulse"></div>
+        <div class="waveform-bars">
+          <div class="waveform-bar"></div>
+          <div class="waveform-bar"></div>
+          <div class="waveform-bar"></div>
+          <div class="waveform-bar"></div>
+          <div class="waveform-bar"></div>
         </div>
-        
-        <div id="errorBox" class="error hidden"></div>
-        
-        <div class="transcript-box hidden" id="transcriptBox">
-            <strong>You said:</strong>
-            <p id="transcript" style="margin-top: 10px; font-size: 16px;">...</p>
+      </div>
+
+      <!-- Status -->
+      <div class="status" id="status">Ready to listen</div>
+
+      <!-- Controls -->
+      <div class="controls">
+        <button id="startBtn" class="btn btn-start">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><path d="M12 14c1.66 0 3-1.34 3-3V5c0-1.66-1.34-3-3-3S9 3.34 9 5v6c0 1.66 1.34 3 3 3z"/><path d="M17 11c0 2.76-2.24 5-5 5s-5-2.24-5-5H5c0 3.53 2.61 6.43 6 6.92V21h2v-3.08c3.39-.49 6-3.39 6-6.92h-2z"/></svg>
+          Start Speaking
+        </button>
+        <button id="stopBtn" class="btn btn-stop" disabled>
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>
+          Stop Speaking
+        </button>
+      </div>
+
+      <!-- Status Messages -->
+      <div id="errorBox" class="status-message hidden"></div>
+
+      <!-- Thinking Indicator -->
+      <div id="thinkingIndicator" class="thinking-indicator hidden">
+        <div class="thinking-dots"><span></span><span></span><span></span></div>
+        <span id="thinkingText" class="thinking-label">Thinking...</span>
+      </div>
+
+      <!-- Transcript Card -->
+      <div class="message-card hidden" id="transcriptBox">
+        <div class="message-card-label user">You said</div>
+        <div class="message-card-text" id="transcript"></div>
+      </div>
+
+      <!-- Response Card -->
+      <div class="message-card hidden" id="responseBox">
+        <div class="message-card-label assistant">AI responds</div>
+        <div class="message-card-text" id="response"></div>
+      </div>
+
+      <!-- Emotional State -->
+      <div class="state-grid hidden" id="stateInfo">
+        <div class="state-card">
+          <span class="state-label">Emotion</span>
+          <span class="state-value" id="valence">—</span>
         </div>
-        
-        <div class="response-box hidden" id="responseBox">
-            <strong>AI responds:</strong>
-            <p id="response" style="margin-top: 10px; font-size: 16px;">...</p>
+        <div class="state-card">
+          <span class="state-label">Energy</span>
+          <span class="state-value" id="arousal">—</span>
         </div>
-        
-        <div class="state-info hidden" id="stateInfo">
-            <div class="state-item">
-                <span class="state-label">EMOTION</span>
-                <span class="state-value" id="valence">-</span>
-            </div>
-            <div class="state-item">
-                <span class="state-label">ENERGY</span>
-                <span class="state-value" id="arousal">-</span>
-            </div>
-            <div class="state-item">
-                <span class="state-label">CLARITY</span>
-                <span class="state-value" id="clarity">-</span>
-            </div>
-            <div class="state-item">
-                <span class="state-label">STRESS</span>
-                <span class="state-value" id="stress">-</span>
-            </div>
+        <div class="state-card">
+          <span class="state-label">Clarity</span>
+          <span class="state-value" id="clarity">—</span>
         </div>
-    </div>
-    
-    <!-- Debug & Monitoring Panels -->
-    <div class="debug-panels">
-        <!-- Model Outputs Panel -->
+        <div class="state-card">
+          <span class="state-label">Stress</span>
+          <span class="state-value" id="stress">—</span>
+        </div>
+      </div>
+
+      <!-- Debug Panels -->
+      <div class="debug-panels">
+
+        <!-- Model Outputs -->
         <div class="debug-panel">
-            <div class="panel-title">🤖 Model Outputs</div>
-            
-            <div class="section-header">🎤 ASR (Whisper)</div>
-            <div id="modelASR">
-                <div class="data-row">
-                    <span class="data-label">Transcript:</span>
-                    <span class="data-value">-</span>
-                </div>
-                <div class="data-row">
-                    <span class="data-label">Latency:</span>
-                    <span class="data-value">-</span>
-                </div>
-            </div>
-            
-            <div class="section-header">💭 Text Emotion (RoBERTa)</div>
-            <div id="modelTextEmotion">
-                <div class="data-row">
-                    <span class="data-label">No data yet</span>
-                </div>
-            </div>
-            
-            <div class="section-header">🎵 SER (Wav2Vec2)</div>
-            <div id="modelSER">
-                <div class="data-row">
-                    <span class="data-label">Angry:</span>
-                    <span class="data-value">0.00</span>
-                </div>
-                <div class="data-row">
-                    <span class="data-label">Happy:</span>
-                    <span class="data-value">0.00</span>
-                </div>
-                <div class="data-row">
-                    <span class="data-label">Neutral:</span>
-                    <span class="data-value">0.00</span>
-                </div>
-                <div class="data-row">
-                    <span class="data-label">Sad:</span>
-                    <span class="data-value">0.00</span>
-                </div>
-            </div>
-            
-            <div class="section-header">🔊 AST (Audio Events)</div>
-            <div id="modelAST">
-                <div class="data-row">
-                    <span class="data-label">No events detected</span>
-                </div>
-            </div>
-            
-            <div class="section-header">🎵 Acoustic Features (Dynamic)</div>
-            <div id="modelAcoustic">
-                <div class="data-row">
-                    <span class="data-label">Speech Rate:</span>
-                    <span class="data-value">0.00 WPS</span>
-                </div>
-                <div class="data-row">
-                    <span class="data-label">Pause Duration:</span>
-                    <span class="data-value">0.00 s</span>
-                </div>
-                <div class="data-row">
-                    <span class="data-label">Jitter:</span>
-                    <span class="data-value">0.000</span>
-                </div>
-            </div>
-            
-            <div class="section-header">🎯 Fusion Output</div>
-            <div id="modelFusion">
-                <div class="data-row">
-                    <span class="data-label">Valence:</span>
-                    <span class="data-value">0.00</span>
-                </div>
-                <div class="data-row">
-                    <span class="data-label">Arousal:</span>
-                    <span class="data-value">0.00</span>
-                </div>
-                <div class="data-row">
-                    <span class="data-label">Stress:</span>
-                    <span class="data-value">0.00</span>
-                </div>
-                <div class="data-row">
-                    <span class="data-label">Clarity:</span>
-                    <span class="data-value">0.00</span>
-                </div>
-            </div>
+          <div class="panel-title">🤖 Model Outputs</div>
+
+          <div class="section-header">ASR (Whisper)</div>
+          <div id="modelASR">
+            <div class="data-row"><span class="data-label">Transcript:</span><span class="data-value">—</span></div>
+            <div class="data-row"><span class="data-label">Latency:</span><span class="data-value">—</span></div>
+          </div>
+
+          <div class="section-header">Text Emotion (RoBERTa)</div>
+          <div id="modelTextEmotion">
+            <div class="data-row"><span class="data-label">No data yet</span></div>
+          </div>
+
+          <div class="section-header">SER (Wav2Vec2)</div>
+          <div id="modelSER">
+            <div class="data-row"><span class="data-label">Angry:</span><span class="data-value">0.00</span></div>
+            <div class="data-row"><span class="data-label">Happy:</span><span class="data-value">0.00</span></div>
+            <div class="data-row"><span class="data-label">Neutral:</span><span class="data-value">0.00</span></div>
+            <div class="data-row"><span class="data-label">Sad:</span><span class="data-value">0.00</span></div>
+          </div>
+
+          <div class="section-header">AST (Audio Events)</div>
+          <div id="modelAST">
+            <div class="data-row"><span class="data-label">No events detected</span></div>
+          </div>
+
+          <div class="section-header">Acoustic Features</div>
+          <div id="modelAcoustic">
+            <div class="data-row"><span class="data-label">Speech Rate:</span><span class="data-value">0.00 WPS</span></div>
+            <div class="data-row"><span class="data-label">Pause Duration:</span><span class="data-value">0.00 s</span></div>
+            <div class="data-row"><span class="data-label">Jitter:</span><span class="data-value">0.000</span></div>
+          </div>
+
+          <div class="section-header">Fusion Output</div>
+          <div id="modelFusion">
+            <div class="data-row"><span class="data-label">Valence:</span><span class="data-value">0.00</span></div>
+            <div class="data-row"><span class="data-label">Arousal:</span><span class="data-value">0.00</span></div>
+            <div class="data-row"><span class="data-label">Stress:</span><span class="data-value">0.00</span></div>
+            <div class="data-row"><span class="data-label">Clarity:</span><span class="data-value">0.00</span></div>
+          </div>
         </div>
-        
-        <!-- Memory & State Panel -->
+
+        <!-- Memory & State -->
         <div class="debug-panel">
-            <div class="panel-title">🧠 Memory & State</div>
-            
-            <div class="section-header">📋 Session Info</div>
-            <div class="data-row">
-                <span class="data-label">Session ID:</span>
-                <span class="data-value" id="memSessionId">-</span>
-            </div>
-            <div class="data-row">
-                <span class="data-label">Turn Count:</span>
-                <span class="data-value" id="memTurnCount">0</span>
-            </div>
-            
-            <div class="section-header">🎯 Topic Tracking</div>
-            <div class="data-row">
-                <span class="data-label">Current Topic:</span>
-                <span class="data-value" id="memTopic">general</span>
-            </div>
-            <div class="data-row">
-                <span class="data-label">Confidence:</span>
-                <span class="data-value" id="memTopicConf">0%</span>
-            </div>
-            
-            <div class="section-header">📈 Emotional Trends</div>
-            <div class="data-row">
-                <span class="data-label">Mode:</span>
-                <span class="data-value" id="memMode">instant</span>
-            </div>
-            <div class="data-row">
-                <span class="data-label">Confidence:</span>
-                <span class="data-value" id="memModeConf">0%</span>
-            </div>
-            <div class="data-row">
-                <span class="data-label">Valence:</span>
-                <span>
-                    <span class="data-value" id="memValence">0.00</span>
-                    <span id="memValenceTrend" class="trend-indicator">→</span>
-                </span>
-            </div>
-            <div class="data-row">
-                <span class="data-label">Arousal:</span>
-                <span>
-                    <span class="data-value" id="memArousal">0.00</span>
-                    <span id="memArousalTrend" class="trend-indicator">→</span>
-                </span>
-            </div>
-            <div class="data-row">
-                <span class="data-label">Stress:</span>
-                <span>
-                    <span class="data-value" id="memStress">0.00</span>
-                    <span id="memStressTrend" class="trend-indicator">→</span>
-                </span>
-            </div>
-            <div class="data-row">
-                <span class="data-label">Clarity:</span>
-                <span>
-                    <span class="data-value" id="memClarity">0.00</span>
-                    <span id="memClarityTrend" class="trend-indicator">→</span>
-                </span>
-            </div>
-            
-            <div class="section-header">💬 Recent Turns (Buffer: 8)</div>
-            <div id="memRecentTurns">
-                <div class="data-row">
-                    <span class="data-label">No turns yet</span>
-                </div>
-            </div>
-            
-            <div class="section-header">🎭 Dialogue State</div>
-            <div class="data-row">
-                <span class="data-label">Recent Intents:</span>
-                <span class="data-value" id="memIntents">-</span>
-            </div>
-            <div class="data-row">
-                <span class="data-label">Coherence:</span>
-                <span class="data-value" id="memCoherence">1.00</span>
-            </div>
-            
-            <div class="section-header">🧠 Long-Term Memory (Qdrant)</div>
-            <div class="data-row">
-                <span class="data-label">Episodic:</span>
-                <span class="data-value" id="memEpisodic">0</span>
-            </div>
-            <div class="data-row">
-                <span class="data-label">Semantic:</span>
-                <span class="data-value" id="memSemantic">0</span>
-            </div>
-            <div class="data-row">
-                <span class="data-label">Last Retrieval:</span>
-                <span class="data-value" id="memLastRetrieval" style="font-size: 10px;">N/A</span>
-            </div>
+          <div class="panel-title">🧠 Memory & State</div>
+
+          <div class="section-header">Session Info</div>
+          <div class="data-row"><span class="data-label">Session ID:</span><span class="data-value" id="memSessionId">—</span></div>
+          <div class="data-row"><span class="data-label">Turn Count:</span><span class="data-value" id="memTurnCount">0</span></div>
+
+          <div class="section-header">Topic Tracking</div>
+          <div class="data-row"><span class="data-label">Current Topic:</span><span class="data-value" id="memTopic">general</span></div>
+          <div class="data-row"><span class="data-label">Confidence:</span><span class="data-value" id="memTopicConf">0%</span></div>
+
+          <div class="section-header">Emotional Trends</div>
+          <div class="sparkline-container" id="sparklineContainer" style="display:none;">
+            <div class="sparkline-label">Valence / Stress over turns</div>
+            <canvas id="emotionSparkline" width="400" height="60"></canvas>
+          </div>
+          <div class="data-row"><span class="data-label">Mode:</span><span class="data-value" id="memMode">instant</span></div>
+          <div class="data-row"><span class="data-label">Confidence:</span><span class="data-value" id="memModeConf">0%</span></div>
+          <div class="data-row">
+            <span class="data-label">Valence:</span>
+            <span><span class="data-value" id="memValence">0.00</span><span id="memValenceTrend" class="trend-indicator">→</span></span>
+          </div>
+          <div class="data-row">
+            <span class="data-label">Arousal:</span>
+            <span><span class="data-value" id="memArousal">0.00</span><span id="memArousalTrend" class="trend-indicator">→</span></span>
+          </div>
+          <div class="data-row">
+            <span class="data-label">Stress:</span>
+            <span><span class="data-value" id="memStress">0.00</span><span id="memStressTrend" class="trend-indicator">→</span></span>
+          </div>
+          <div class="data-row">
+            <span class="data-label">Clarity:</span>
+            <span><span class="data-value" id="memClarity">0.00</span><span id="memClarityTrend" class="trend-indicator">→</span></span>
+          </div>
+
+          <div class="section-header">Recent Turns</div>
+          <div id="memRecentTurns">
+            <div class="data-row"><span class="data-label">No turns yet</span></div>
+          </div>
+
+          <div class="section-header">Dialogue State</div>
+          <div class="data-row"><span class="data-label">Recent Intents:</span><span class="data-value" id="memIntents">—</span></div>
+          <div class="data-row"><span class="data-label">Coherence:</span><span class="data-value" id="memCoherence">1.00</span></div>
+
+          <div class="section-header">Long-Term Memory (Qdrant)</div>
+          <div class="data-row"><span class="data-label">Episodic:</span><span class="data-value" id="memEpisodic">0</span></div>
+          <div class="data-row"><span class="data-label">Semantic:</span><span class="data-value" id="memSemantic">0</span></div>
+          <div class="data-row"><span class="data-label">Last Retrieval:</span><span class="data-value" id="memLastRetrieval" style="font-size:10px;">N/A</span></div>
         </div>
-    </div>
-    
-    </div> <!-- Close main-container -->
-    </div> <!-- Close main-content -->
-    
-    <script>
-        let mediaRecorder;
-        let audioChunks = [];
-        let ws;
-        let isRecording = false;
-        let stream;
-        let lastSentPayload = null;  // For retry after reconnection
-        let wsReconnectAttempts = 0;
-        const WS_MAX_RECONNECT = 5;
-        const WS_BASE_DELAY = 1000; // 1 second
-        
-        // ===== SESSION PERSISTENCE (localStorage) =====
-        function generateSessionId() {
-            return 'session_' + Math.random().toString(36).substring(2, 15);
-        }
-        
-        function getOrCreateSessionId() {
-            let sessionId = localStorage.getItem('currentSessionId');
-            if (!sessionId) {
-                sessionId = generateSessionId();
-                localStorage.setItem('currentSessionId', sessionId);
-                console.log('✨ Created new session:', sessionId);
-            } else {
-                console.log('📂 Loaded existing session:', sessionId);
-            }
-            return sessionId;
-        }
-        
-        let sessionId = getOrCreateSessionId();
-        
-        const ring = document.getElementById('assistantRing');
-        const status = document.getElementById('status');
-        const startBtn = document.getElementById('startBtn');
-        const stopBtn = document.getElementById('stopBtn');
-        const transcriptEl = document.getElementById('transcript');
-        const responseEl = document.getElementById('response');
-        const errorBox = document.getElementById('errorBox');
-        const transcriptBox = document.getElementById('transcriptBox');
-        const responseBox = document.getElementById('responseBox');
-        const stateInfo = document.getElementById('stateInfo');
-        const turnCount = document.getElementById('turnCount');
-        const modeBadge = document.getElementById('modeBadge');
-        
-        // ===== CLIENT-SIDE SESSION LIST =====
-        // We maintain sessions in localStorage so the sidebar always works,
-        // even if the server-side Modal Dict iteration fails.
-        
-        function getLocalSessions() {
-            try {
-                return JSON.parse(localStorage.getItem('chatSessions') || '[]');
-            } catch { return []; }
-        }
-        
-        function saveLocalSessions(sessions) {
-            localStorage.setItem('chatSessions', JSON.stringify(sessions));
-        }
-        
-        function upsertLocalSession(id, title, turns) {
-            const sessions = getLocalSessions();
-            const existing = sessions.find(s => s.session_id === id);
-            if (existing) {
-                if (title) existing.title = title;
-                if (turns !== undefined) existing.turn_count = turns;
-                existing.last_updated = new Date().toISOString();
-            } else {
-                sessions.unshift({
-                    session_id: id,
-                    title: title || 'New Conversation',
-                    turn_count: turns || 0,
-                    created_at: new Date().toISOString(),
-                    last_updated: new Date().toISOString(),
-                });
-            }
-            // Sort by last updated, keep max 50
-            sessions.sort((a, b) => (b.last_updated || '').localeCompare(a.last_updated || ''));
-            saveLocalSessions(sessions.slice(0, 50));
-        }
-        
-        function removeLocalSession(id) {
-            const sessions = getLocalSessions().filter(s => s.session_id !== id);
-            saveLocalSessions(sessions);
-        }
-        
-        // ===== SIDEBAR RENDERING =====
-        
-        function renderSidebar() {
-            const sessions = getLocalSessions();
-            const sessionList = document.getElementById('sessionList');
-            
-            if (sessions.length === 0) {
-                sessionList.innerHTML = `
-                    <div style="opacity: 0.6; font-size: 12px; text-align: center; padding: 20px;">
-                        No conversations yet.<br>Start speaking to begin!
-                    </div>
-                `;
-                return;
-            }
-            
-            sessionList.innerHTML = sessions.map(session => {
-                const isActive = session.session_id === sessionId;
-                const date = new Date(session.last_updated);
-                const timeStr = date.toLocaleString('en-US', { 
-                    month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit'
-                });
-                const title = session.title || 'New Conversation';
-                const turns = session.turn_count || 0;
-                
-                return `
-                    <div class="session-item ${isActive ? 'active' : ''}" 
-                         onclick="switchToSession('${session.session_id}')">
-                        <div class="session-info">
-                            <div class="session-title">${title}</div>
-                            <div class="session-meta">${timeStr} · ${turns} turn${turns !== 1 ? 's' : ''}</div>
-                        </div>
-                        <button class="delete-session-btn" 
-                                onclick="deleteSession(event, '${session.session_id}')">
-                            🗑️
-                        </button>
-                    </div>
-                `;
-            }).join('');
-        }
-        
-        // ===== SESSION MANAGEMENT =====
-        
-        async function loadSessions() {
-            // Always render from localStorage first (instant, no network)
-            renderSidebar();
-            
-            // Then try to sync with server in the background
-            try {
-                const response = await fetch('/api/sessions');
-                if (response.ok) {
-                    const data = await response.json();
-                    if (data.sessions && data.sessions.length > 0) {
-                        // Merge server sessions into localStorage
-                        for (const s of data.sessions) {
-                            upsertLocalSession(s.session_id, s.title, s.turn_count);
-                        }
-                        renderSidebar();
-                    }
-                }
-            } catch (e) {
-                // Server unavailable — localStorage sidebar still works
-                console.warn('Server session sync failed:', e.message);
-            }
-        }
-        
-        async function createNewSession() {
-            try {
-                const response = await fetch('/api/sessions/new', { method: 'POST' });
-                const data = await response.json();
-                
-                sessionId = data.session_id;
-                localStorage.setItem('currentSessionId', sessionId);
-                upsertLocalSession(sessionId, 'New Conversation', 0);
-                
-                transcriptEl.textContent = '';
-                responseEl.textContent = '';
-                transcriptBox.classList.add('hidden');
-                responseBox.classList.add('hidden');
-                stateInfo.classList.add('hidden');
-                
-                renderSidebar();
-                showStatus('✅ New session created!', 'success');
-            } catch (error) {
-                // Even if server fails, create locally
-                sessionId = 'local_' + Date.now();
-                localStorage.setItem('currentSessionId', sessionId);
-                upsertLocalSession(sessionId, 'New Conversation', 0);
-                renderSidebar();
-                showStatus('✅ New session created (offline)', 'success');
-            }
-        }
-        
-        function switchToSession(newSessionId) {
-            if (newSessionId === sessionId) return;
-            
-            sessionId = newSessionId;
-            localStorage.setItem('currentSessionId', sessionId);
-            
-            transcriptEl.textContent = '';
-            responseEl.textContent = '';
-            transcriptBox.classList.add('hidden');
-            responseBox.classList.add('hidden');
-            stateInfo.classList.add('hidden');
-            
-            renderSidebar();
-            showStatus(`🔄 Switched to conversation`, 'info');
-        }
-        
-        async function deleteSession(event, sessionIdToDelete) {
-            event.stopPropagation();
-            if (!confirm('Delete this conversation?')) return;
-            
-            // Remove from localStorage immediately
-            removeLocalSession(sessionIdToDelete);
-            
-            // Try server-side delete
-            try {
-                await fetch(`/api/sessions/${sessionIdToDelete}`, { method: 'DELETE' });
-            } catch (e) { /* server may be down */ }
-            
-            if (sessionIdToDelete === sessionId) {
-                // Deleted the active session — create a new one
-                await createNewSession();
-            } else {
-                renderSidebar();
-            }
-            showStatus('✅ Session deleted', 'success');
-        }
-        
-        renderSidebar();
-        
-        function showError(message) {
-            errorBox.textContent = message.startsWith('❌') ? message : '❌ ' + message;
-            errorBox.className = 'error';
-            errorBox.classList.remove('hidden');
-            setTimeout(() => {
-                errorBox.classList.add('hidden');
-            }, 5000);
-        }
-        
-        function showStatus(message, type = 'info') {
-            errorBox.textContent = message;
-            errorBox.className = type === 'success' ? 'success-status' : type === 'error' ? 'error' : 'info-status';
-            errorBox.classList.remove('hidden');
-            setTimeout(() => {
-                errorBox.classList.add('hidden');
-            }, 3000);
-        }
-        
-        function updateState(data) {
-            stateInfo.classList.remove('hidden');
-            
-            const state = data.adaptive_state;
-            
-            document.getElementById('valence').textContent = 
-                state.valence > 0 ? `😊 +${state.valence.toFixed(2)}` : `😔 ${state.valence.toFixed(2)}`;
-            document.getElementById('arousal').textContent = 
-                `⚡ ${(state.arousal * 100).toFixed(0)}%`;
-            document.getElementById('clarity').textContent = 
-                `💡 ${(state.clarity * 100).toFixed(0)}%`;
-            document.getElementById('stress').textContent = 
-                state.stress > 0.5 ? `😰 ${(state.stress * 100).toFixed(0)}%` : `😌 ${(state.stress * 100).toFixed(0)}%`;
-            
-            turnCount.textContent = data.turn_count;
-            
-            if (data.emotional_mode === 'trend') {
-                modeBadge.textContent = 'Trend Mode';
-                modeBadge.className = 'mode-badge mode-trend';
-            } else {
-                modeBadge.textContent = 'Instant Mode';
-                modeBadge.className = 'mode-badge mode-instant';
-            }
-        }
-        
-        function updateMemoryView(data) {
-            if (!data.memory_view) return;
-            
-            const mem = data.memory_view;
-            
-            document.getElementById('memSessionId').textContent = mem.session_id.substring(0, 15) + '...';
-            document.getElementById('memTurnCount').textContent = mem.dialogue_state.turn_count;
-            
-            document.getElementById('memTopic').textContent = mem.topic_info.current_topic;
-            document.getElementById('memTopicConf').textContent = (mem.topic_info.confidence * 100).toFixed(0) + '%';
-            
-            document.getElementById('memMode').textContent = mem.emotional_trends.mode;
-            document.getElementById('memModeConf').textContent = (mem.emotional_trends.confidence * 100).toFixed(0) + '%';
-            
-            const valence = mem.emotional_trends.valence;
-            document.getElementById('memValence').textContent = valence.current.toFixed(2);
-            updateTrendIndicator('memValenceTrend', valence.trend);
-            
-            const arousal = mem.emotional_trends.arousal;
-            document.getElementById('memArousal').textContent = arousal.current.toFixed(2);
-            updateTrendIndicator('memArousalTrend', arousal.trend);
-            
-            const stress = mem.emotional_trends.stress;
-            document.getElementById('memStress').textContent = stress.current.toFixed(2);
-            updateTrendIndicator('memStressTrend', stress.trend);
-            
-            const clarity = mem.emotional_trends.clarity;
-            document.getElementById('memClarity').textContent = clarity.current.toFixed(2);
-            updateTrendIndicator('memClarityTrend', clarity.trend);
-            
-            const turnsContainer = document.getElementById('memRecentTurns');
-            if (mem.recent_turns.length > 0) {
-                turnsContainer.innerHTML = mem.recent_turns.map((turn, idx) => `
-                    <div style="margin-bottom: 12px; padding: 8px; background: rgba(255,255,255,0.05); border-radius: 5px; border-left: 3px solid #60a5fa;">
-                        <div style="font-size: 11px; opacity: 0.7; margin-bottom: 4px;">
-                            Turn ${data.turn_count - mem.recent_turns.length + idx + 1} | ${turn.topic}
-                        </div>
-                        <div style="font-size: 12px; margin-bottom: 2px;">
-                            👤 ${turn.user}
-                        </div>
-                        <div style="font-size: 12px; color: #4ade80;">
-                            🤖 ${turn.ai}
-                        </div>
-                    </div>
-                `).join('');
-            }
-            
-            if (mem.dialogue_state.recent_intents.length > 0) {
-                document.getElementById('memIntents').textContent = mem.dialogue_state.recent_intents.slice(-3).join(', ');
-            }
-            document.getElementById('memCoherence').textContent = mem.dialogue_state.coherence_score.toFixed(2);
-            
-            if (mem.long_term_memory) {
-                const stats = mem.long_term_memory.stats;
-                document.getElementById('memEpisodic').textContent = stats.episodic_count || 0;
-                document.getElementById('memSemantic').textContent = stats.semantic_count || 0;
-                document.getElementById('memLastRetrieval').textContent = 
-                    mem.long_term_memory.last_retrieval || 'N/A';
-            }
-        }
-        
-        function updateTrendIndicator(elementId, trend) {
-            const element = document.getElementById(elementId);
-            if (trend > 0.05) {
-                element.textContent = '↗️';
-                element.className = 'trend-indicator trend-up';
-            } else if (trend < -0.05) {
-                element.textContent = '↘️';
-                element.className = 'trend-indicator trend-down';
-            } else {
-                element.textContent = '→';
-                element.className = 'trend-indicator trend-stable';
-            }
-        }
-        
-        function updateModelOutputs(data) {
-            if (!data.model_outputs) return;
-            
-            const models = data.model_outputs;
-            
-            if (models.asr) {
-                document.getElementById('modelASR').innerHTML = `
-                    <div class="data-row">
-                        <span class="data-label">Transcript:</span>
-                        <span class="data-value">${models.asr.transcript.substring(0, 50)}...</span>
-                    </div>
-                    <div class="data-row">
-                        <span class="data-label">Latency:</span>
-                        <span class="data-value">${models.asr.latency_ms.toFixed(0)}ms</span>
-                    </div>
-                `;
-            }
-            
-            if (models.text_emotion && models.text_emotion.top_emotions) {
-                const emotions = models.text_emotion.top_emotions;
-                let html = '';
-                for (const [emotion, score] of Object.entries(emotions)) {
-                    html += `
-                        <div class="data-row">
-                            <span class="data-label">${emotion}:</span>
-                            <span class="data-value">${(score * 100).toFixed(1)}%</span>
-                        </div>
-                        <div class="emotion-bar">
-                            <div class="emotion-bar-fill" style="width: ${score * 100}%"></div>
-                        </div>
-                    `;
-                }
-                document.getElementById('modelTextEmotion').innerHTML = html;
-            }
-            
-            if (models.audio_analysis && models.audio_analysis.ser) {
-                const ser = models.audio_analysis.ser;
-                document.getElementById('modelSER').innerHTML = `
-                    <div class="data-row">
-                        <span class="data-label">Angry:</span>
-                        <span class="data-value">${(ser.angry * 100).toFixed(1)}%</span>
-                    </div>
-                    <div class="emotion-bar">
-                        <div class="emotion-bar-fill" style="width: ${ser.angry * 100}%"></div>
-                    </div>
-                    <div class="data-row">
-                        <span class="data-label">Happy:</span>
-                        <span class="data-value">${(ser.happy * 100).toFixed(1)}%</span>
-                    </div>
-                    <div class="emotion-bar">
-                        <div class="emotion-bar-fill" style="width: ${ser.happy * 100}%"></div>
-                    </div>
-                    <div class="data-row">
-                        <span class="data-label">Neutral:</span>
-                        <span class="data-value">${(ser.neutral * 100).toFixed(1)}%</span>
-                    </div>
-                    <div class="emotion-bar">
-                        <div class="emotion-bar-fill" style="width: ${ser.neutral * 100}%"></div>
-                    </div>
-                    <div class="data-row">
-                        <span class="data-label">Sad:</span>
-                        <span class="data-value">${(ser.sad * 100).toFixed(1)}%</span>
-                    </div>
-                    <div class="emotion-bar">
-                        <div class="emotion-bar-fill" style="width: ${ser.sad * 100}%"></div>
-                    </div>
-                    <div class="data-row">
-                        <span class="data-label">Latency:</span>
-                        <span class="data-value">${models.audio_analysis.latency_ms.toFixed(0)}ms</span>
-                    </div>
-                `;
-            }
-            
-            if (models.audio_analysis && models.audio_analysis.ast) {
-                const ast = models.audio_analysis.ast;
-                if (Object.keys(ast).length > 0) {
-                    let html = '';
-                    for (const [event, score] of Object.entries(ast)) {
-                        html += `
-                            <div class="data-row">
-                                <span class="data-label">${event}:</span>
-                                <span class="data-value">${(score * 100).toFixed(1)}%</span>
-                            </div>
-                            <div class="emotion-bar">
-                                <div class="emotion-bar-fill" style="width: ${score * 100}%"></div>
-                            </div>
-                        `;
-                    }
-                    document.getElementById('modelAST').innerHTML = html;
-                } else {
-                    document.getElementById('modelAST').innerHTML = `
-                        <div class="data-row">
-                            <span class="data-label">No events detected</span>
-                        </div>
-                    `;
-                }
-            }
-            
-            if (models.acoustic_features) {
-                const acoustic = models.acoustic_features;
-                document.getElementById('modelAcoustic').innerHTML = `
-                    <div class="data-row">
-                        <span class="data-label">Speech Rate:</span>
-                        <span class="data-value">${acoustic.speech_rate.toFixed(2)} WPS</span>
-                    </div>
-                    <div class="data-row">
-                        <span class="data-label">Pause Duration:</span>
-                        <span class="data-value">${acoustic.pause_duration.toFixed(3)} s</span>
-                    </div>
-                    <div class="data-row">
-                        <span class="data-label">Jitter:</span>
-                        <span class="data-value">${acoustic.jitter.toFixed(3)}</span>
-                    </div>
-                    <div class="data-row">
-                        <span class="data-label">Word Count:</span>
-                        <span class="data-value">${acoustic.word_count}</span>
-                    </div>
-                    <div class="data-row">
-                        <span class="data-label">Audio Duration:</span>
-                        <span class="data-value">${acoustic.audio_duration.toFixed(2)} s</span>
-                    </div>
-                `;
-            }
-            
-            if (models.fusion && models.fusion.instant_state) {
-                const state = models.fusion.instant_state;
-                document.getElementById('modelFusion').innerHTML = `
-                    <div class="data-row">
-                        <span class="data-label">Valence:</span>
-                        <span class="data-value">${state.valence.toFixed(3)}</span>
-                    </div>
-                    <div class="data-row">
-                        <span class="data-label">Arousal:</span>
-                        <span class="data-value">${state.arousal.toFixed(3)}</span>
-                    </div>
-                    <div class="data-row">
-                        <span class="data-label">Stress:</span>
-                        <span class="data-value">${state.stress.toFixed(3)}</span>
-                    </div>
-                    <div class="data-row">
-                        <span class="data-label">Clarity:</span>
-                        <span class="data-value">${state.clarity.toFixed(3)}</span>
-                    </div>
-                `;
-            }
-        }
-        
-        // ===== WEBSOCKET RECONNECTION =====
-        
-        function connectWebSocket() {
-            return new Promise((resolve, reject) => {
-                const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-                ws = new WebSocket(`${protocol}//${window.location.host}/ws/conversation`);
-                
-                ws.onopen = () => {
-                    console.log('✅ WebSocket connected');
-                    wsReconnectAttempts = 0;
-                    resolve(ws);
-                };
-                
-                ws.onmessage = async (event) => {
-                    try {
-                        const data = JSON.parse(event.data);
-                        
-                        if (data.error) {
-                            showError(data.error);
-                            ring.className = 'assistant-ring';
-                            status.textContent = 'Ready to listen';
-                            startBtn.disabled = false;
-                            stopBtn.disabled = true;
-                            lastSentPayload = null;
-                            return;
-                        }
-                        
-                        console.log('📨 Received:', data);
-                        lastSentPayload = null; // Clear retry on success
-                        
-                        transcriptBox.classList.remove('hidden');
-                        transcriptEl.textContent = data.transcript;
-                        
-                        responseBox.classList.remove('hidden');
-                        responseEl.textContent = data.llm_reply;
-                        
-                        updateState(data);
-                        updateMemoryView(data);
-                        updateModelOutputs(data);
-                        
-                        // Update sidebar with latest session data
-                        upsertLocalSession(sessionId, data.transcript, data.turn_count);
-                        renderSidebar();
-                        
-                        if (data.tts_audio) {
-                            const audioData = atob(data.tts_audio);
-                            const audioArray = new Uint8Array(audioData.length);
-                            for (let i = 0; i < audioData.length; i++) {
-                                audioArray[i] = audioData.charCodeAt(i);
-                            }
-                            
-                            const audioBlob = new Blob([audioArray], { type: 'audio/wav' });
-                            const audioUrl = URL.createObjectURL(audioBlob);
-                            const audio = new Audio(audioUrl);
-                            
-                            ring.className = 'assistant-ring speaking';
-                            status.textContent = '🔊 Speaking...';
-                            
-                            audio.play();
-                            audio.onended = () => {
-                                ring.className = 'assistant-ring';
-                                status.textContent = 'Ready to listen';
-                                startBtn.disabled = false;
-                                stopBtn.disabled = true;
-                                ws.close();
-                            };
-                        } else {
-                            ring.className = 'assistant-ring';
-                            status.textContent = 'Ready to listen';
-                            startBtn.disabled = false;
-                            stopBtn.disabled = true;
-                            ws.close();
-                        }
-                    } catch (e) {
-                        console.error('Error:', e);
-                        showError('Error processing response');
-                        ring.className = 'assistant-ring';
-                        status.textContent = 'Ready to listen';
-                        startBtn.disabled = false;
-                        stopBtn.disabled = true;
-                    }
-                };
-                
-                ws.onerror = (error) => {
-                    console.error('WebSocket error:', error);
-                };
-                
-                ws.onclose = (event) => {
-                    console.log(`🔌 WebSocket closed (code: ${event.code})`);
-                    // If we had a pending send, attempt reconnection
-                    if (lastSentPayload && wsReconnectAttempts < WS_MAX_RECONNECT) {
-                        const delay = WS_BASE_DELAY * Math.pow(2, wsReconnectAttempts);
-                        wsReconnectAttempts++;
-                        console.log(`🔄 Reconnecting in ${delay}ms (attempt ${wsReconnectAttempts}/${WS_MAX_RECONNECT})`);
-                        status.textContent = `🔄 Reconnecting... (${wsReconnectAttempts}/${WS_MAX_RECONNECT})`;
-                        ring.className = 'assistant-ring processing';
-                        
-                        setTimeout(async () => {
-                            try {
-                                await connectWebSocket();
-                                // Resend the failed message
-                                ws.send(lastSentPayload);
-                                status.textContent = '🤔 Processing...';
-                            } catch (e) {
-                                console.error('Reconnection failed:', e);
-                                showError(`Connection lost. ${wsReconnectAttempts >= WS_MAX_RECONNECT ? 'Max retries reached.' : 'Retrying...'}`);
-                                lastSentPayload = null;
-                                ring.className = 'assistant-ring';
-                                status.textContent = 'Ready to listen';
-                                startBtn.disabled = false;
-                                stopBtn.disabled = true;
-                            }
-                        }, delay);
-                    } else if (!lastSentPayload) {
-                        // Normal close (after audio playback) — reset UI
-                        ring.className = 'assistant-ring';
-                        status.textContent = 'Ready to listen';
-                        startBtn.disabled = false;
-                        stopBtn.disabled = true;
-                    }
-                };
-                
-                // If connection fails to open
-                ws.onerror = () => reject(new Error('WebSocket connection failed'));
-            });
-        }
-        
-        async function startRecording() {
-            if (isRecording) return;
-            
-            try {
-                transcriptBox.classList.add('hidden');
-                responseBox.classList.add('hidden');
-                
-                // Connect (or reuse existing connection)
-                if (!ws || ws.readyState !== WebSocket.OPEN) {
-                    await connectWebSocket();
-                }
-                
-                stream = await navigator.mediaDevices.getUserMedia({ 
-                    audio: {
-                        channelCount: 1,
-                        sampleRate: 16000,
-                        echoCancellation: true,
-                        noiseSuppression: true,
-                        autoGainControl: true
-                    } 
-                });
-                
-                mediaRecorder = new MediaRecorder(stream, {
-                    mimeType: 'audio/webm;codecs=opus'
-                });
-                
-                audioChunks = [];
-                
-                mediaRecorder.ondataavailable = (event) => {
-                    if (event.data.size > 0) {
-                        audioChunks.push(event.data);
-                    }
-                };
-                
-                mediaRecorder.onstop = async () => {
-                    const audioBlob = new Blob(audioChunks, { type: 'audio/webm' });
-                    const arrayBuffer = await audioBlob.arrayBuffer();
-                    
-                    console.log(`📤 Sending ${arrayBuffer.byteLength} bytes`);
-                    
-                    ring.className = 'assistant-ring processing';
-                    status.textContent = '🤔 Processing...';
-                    
-                    const base64Audio = btoa(
-                        new Uint8Array(arrayBuffer).reduce(
-                            (data, byte) => data + String.fromCharCode(byte),
-                            ''
-                        )
-                    );
-                    
-                    const selectedVoice = document.getElementById('voiceSelect').value;
-                    const payload = JSON.stringify({ 
-                        audio: base64Audio,
-                        session_id: sessionId,
-                        voice_name: selectedVoice
-                    });
-                    
-                    // Store for retry on reconnection
-                    lastSentPayload = payload;
-                    ws.send(payload);
-                    
-                    stream.getTracks().forEach(track => track.stop());
-                };
-                
-                mediaRecorder.start();
-                isRecording = true;
-                
-                ring.className = 'assistant-ring listening';
-                status.textContent = '🎙️ Listening... (click Stop when done)';
-                startBtn.disabled = true;
-                stopBtn.disabled = false;
-                
-            } catch (error) {
-                console.error('Error:', error);
-                showError('Microphone access denied or connection failed');
-                ring.className = 'assistant-ring';
-                status.textContent = 'Ready to listen';
-                startBtn.disabled = false;
-                stopBtn.disabled = true;
-            }
-        }
-        
-        function stopRecording() {
-            if (!isRecording || !mediaRecorder) return;
-            
-            mediaRecorder.stop();
-            isRecording = false;
-            stopBtn.disabled = true;
-        }
-        
-        startBtn.addEventListener('click', startRecording);
-        stopBtn.addEventListener('click', stopRecording);
-    </script>
+      </div>
+
+    </div><!-- /main-container -->
+  </main>
+
+  <script src="/static/app.js"></script>
 </body>
 </html>

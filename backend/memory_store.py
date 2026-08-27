@@ -113,7 +113,12 @@ class QdrantMemoryStore:
 
         # Resolve full URL
         if url.startswith("https://"):
-            full_url = url
+            # HTTPS URLs should NOT have port 6333 (that's the HTTP port).
+            # Qdrant Cloud uses port 443 by default for HTTPS.
+            full_url = url.rstrip('/')
+            if full_url.endswith(':6333'):
+                full_url = full_url[:-5]  # Strip :6333 from HTTPS URLs
+                logger.warning("⚠️ Stripped :6333 from HTTPS Qdrant URL (HTTPS uses port 443)")
         elif url.startswith("http://"):
             full_url = f"{url}:{port}" if port and f":{port}" not in url else url
         else:
@@ -150,6 +155,30 @@ class QdrantMemoryStore:
 
         self._initialized = True
         logger.info("✅ Memory store fully initialised")
+
+    def _reconnect(self) -> bool:
+        """Try to re-establish the Qdrant connection after a transient failure.
+        
+        Returns True if reconnection succeeded, False otherwise.
+        Called from error handlers to give the client a chance to recover
+        before latching into permanent fallback mode.
+        """
+        try:
+            logger.info("🔄 Attempting Qdrant reconnection...")
+            # Close existing client if any
+            if self._client:
+                try:
+                    self._client.close()
+                except Exception:
+                    pass
+            self._client = None
+            self._initialized = False
+            self._ensure_initialized()
+            logger.info("✅ Qdrant reconnected successfully")
+            return True
+        except Exception as e:
+            logger.warning(f"⚠️ Qdrant reconnection failed: {e}")
+            return False
 
     def _create_collections(self):
         """Create Qdrant collections and their payload indexes if they don't exist."""
@@ -248,13 +277,21 @@ class QdrantMemoryStore:
             return None
 
     def is_available(self) -> bool:
-        """Check live Qdrant availability (refreshes fallback state)."""
+        """Check live Qdrant availability (refreshes fallback state).
+        
+        If the existing connection is broken, attempts a reconnect
+        before declaring fallback mode.
+        """
         try:
             c = self.client
             if c:
                 c.get_collections()  # health_check() removed in newer qdrant-client
                 return True
         except Exception:
+            # Existing connection is dead — try reconnecting before giving up
+            if self._reconnect():
+                logger.info("✅ Qdrant reconnected via is_available check")
+                return True
             self._fallback   = True
             self._last_retry = time.time()
         return False
@@ -339,8 +376,11 @@ class QdrantMemoryStore:
 
         except Exception as e:
             logger.error(f"❌ Error storing episodic memory: {e}", exc_info=True)
-            self._fallback   = True
-            self._last_retry = time.time()
+            if self._reconnect():
+                logger.info("✅ Qdrant reconnected — episodic store will retry next call")
+            else:
+                self._fallback   = True
+                self._last_retry = time.time()
             return None
 
     # ------------------------------------------------------------------
@@ -403,8 +443,11 @@ class QdrantMemoryStore:
 
         except Exception as e:
             logger.error(f"❌ Error storing semantic memory: {e}", exc_info=True)
-            self._fallback   = True
-            self._last_retry = time.time()
+            if self._reconnect():
+                logger.info("✅ Qdrant reconnected — semantic store will retry next call")
+            else:
+                self._fallback   = True
+                self._last_retry = time.time()
             return None
 
     # ------------------------------------------------------------------
@@ -492,8 +535,11 @@ class QdrantMemoryStore:
 
         except Exception as e:
             logger.error(f"❌ Episodic retrieval failed: {e}", exc_info=True)
-            self._fallback   = True
-            self._last_retry = time.time()
+            if self._reconnect():
+                logger.info("✅ Qdrant reconnected — episodic retrieval will retry next call")
+            else:
+                self._fallback   = True
+                self._last_retry = time.time()
             return []
 
     # ------------------------------------------------------------------
@@ -572,8 +618,11 @@ class QdrantMemoryStore:
 
         except Exception as e:
             logger.error(f"❌ Semantic retrieval failed: {e}", exc_info=True)
-            self._fallback   = True
-            self._last_retry = time.time()
+            if self._reconnect():
+                logger.info("✅ Qdrant reconnected — semantic retrieval will retry next call")
+            else:
+                self._fallback   = True
+                self._last_retry = time.time()
             return []
 
     # ------------------------------------------------------------------

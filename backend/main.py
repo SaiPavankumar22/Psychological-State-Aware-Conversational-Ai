@@ -88,6 +88,8 @@ image = (
     .add_local_file("backend/memory_store.py", remote_path="/root/memory_store.py")
     .add_local_file("backend/memory_orchestrator.py", remote_path="/root/memory_orchestrator.py")
     .add_local_file("frontend/index.html", remote_path="/root/frontend/index.html")
+    .add_local_file("frontend/styles.css", remote_path="/root/frontend/styles.css")
+    .add_local_file("frontend/app.js", remote_path="/root/frontend/app.js")
 )
 
 # =====================================================
@@ -177,7 +179,7 @@ async def update_session_metadata(session_id: str, conversation_state: 'Conversa
         "created_at": metadata.get("created_at", datetime.now().isoformat()),
     })
     
-    session_metadata[session_id] = metadata
+    await session_metadata.put.aio(session_id, metadata)
 
 async def delete_session(session_id: str):
     """Delete a session and its metadata (async-safe with Modal Dict)"""
@@ -185,7 +187,7 @@ async def delete_session(session_id: str):
         if session_id in persistent_sessions:
             del persistent_sessions[session_id]
         if session_id in session_metadata:
-            del session_metadata[session_id]
+            await session_metadata.delete.aio(session_id)
         return True
     except Exception as e:
         logger.error(f"❌ Error deleting session {session_id}: {e}", exc_info=True)
@@ -770,6 +772,263 @@ class ConversationalAI:
                 os.unlink(wav_path)
     
     @modal.method()
+    async def process_asr_only(
+        self,
+        audio_data: str,
+        session_id: str,
+    ) -> dict:
+        """Step 1: Decode audio, run ASR + audio analysis, update emotional state.
+        Returns transcript, emotions, and intermediate state for the next step.
+        """
+        import asyncio
+        from services.services import SER_LABELS
+        
+        lock = get_session_lock(session_id)
+        async with lock:
+            session = get_session(session_id)
+            conv_state = session["conversation"]
+            emotional_tracker = session["emotional_tracker"]
+        
+        audio_bytes = base64.b64decode(audio_data)
+        current_turn = conv_state.dialogue_state.turn_count + 1
+        
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp_file:
+            wav_path = tmp_file.name
+        
+        try:
+            webm_to_wav(audio_bytes, wav_path)
+            
+            asr_task = asyncio.to_thread(self.asr_service.run, wav_path)
+            audio_task = asyncio.to_thread(self.audio_service.run, wav_path)
+            asr_result, audio_result = await asyncio.gather(asr_task, audio_task)
+            
+            transcript = asr_result.get('transcript', '').strip()
+            if not transcript or len(transcript) < 2:
+                transcript = "[User provided empty or very short input]"
+            else:
+                transcript = _sanitize_transcript(transcript)
+            
+            text_emotion = asr_result.get('text_emotion', {})
+            if not isinstance(text_emotion, dict):
+                text_emotion = {}
+            
+            from services.services import extract_acoustic_features
+            acoustic_features = extract_acoustic_features(wav_path, transcript)
+            
+            ser_dict = dict(zip(SER_LABELS, audio_result.get("ser", [0, 0, 0, 0])))
+            instant_psychological_state = self.fusion.fuse(
+                text=text_emotion,
+                ser=ser_dict,
+                ast=audio_result.get("ast", {}),
+                features=acoustic_features,
+            )
+            
+            emotional_tracker.update(instant_psychological_state)
+            adaptive_state = emotional_tracker.get_adaptive_state()
+            
+            topic_shifted, new_topic, topic_confidence = self.memory_mgr.update_topic(transcript)
+            if topic_shifted:
+                conv_state.dialogue_state.update_topic(new_topic, topic_confidence)
+            
+            emotional_shift_detected, shift_dimension = emotional_tracker.detect_major_shift()
+            emotional_shift_magnitude = (
+                abs(emotional_tracker.dimensions[shift_dimension].get_normalized_trend())
+                if shift_dimension else 0.0
+            )
+            
+            should_retrieve, retrieval_reason = self.memory_mgr.should_retrieve_memory(
+                user_query=transcript,
+                topic_changed=topic_shifted,
+                topic_confidence=topic_confidence,
+                emotional_shift_magnitude=emotional_shift_magnitude
+            )
+            
+            memory_context = ""
+            if should_retrieve:
+                try:
+                    memories = self.memory_orchestrator.retrieve_relevant_memories(
+                        user_id=session_id, current_query=transcript, max_memories=6
+                    )
+                    memory_context = self.memory_orchestrator.format_memory_for_llm(memories, max_tokens=400)
+                except Exception as e:
+                    logger.error(f"⚠️ Memory retrieval failed: {e}")
+                    memory_context = ""
+            
+            # Persist partial state so the next step can pick it up
+            lock2 = get_session_lock(session_id)
+            async with lock2:
+                save_session(session_id, session)
+            
+            return {
+                "transcript": transcript,
+                "text_emotion": text_emotion,
+                "audio_analysis": {
+                    "ser": ser_dict,
+                    "ast": dict(sorted(audio_result["ast"].items(), key=lambda x: x[1], reverse=True)[:5]) if audio_result["ast"] else {},
+                    "latency_ms": audio_result["latency"] * 1000,
+                },
+                "acoustic_features": acoustic_features,
+                "fusion": {"instant_state": instant_psychological_state},
+                "adaptive_state": {
+                    k: v for k, v in adaptive_state.items() if k not in ['trends', 'stability']
+                },
+                "memory_context": memory_context,
+                "llm_context": conv_state.get_context_for_llm(),
+                "turn_count": current_turn,
+                "asr_latency_ms": asr_result['latency'] * 1000,
+            }
+        finally:
+            if os.path.exists(wav_path):
+                os.unlink(wav_path)
+    
+    @modal.method()
+    async def process_llm_and_tts(
+        self,
+        asr_result: dict,
+        session_id: str,
+        voice_name: str = "en-IN-KavyaNeural",
+    ) -> dict:
+        """Step 2: Generate LLM reply + TTS audio from ASR results.
+        Returns the full response payload.
+        """
+        import asyncio
+        from services.llm_client import psychological_llm_response
+        from services.tts_azure import synthesize_azure_tts
+        
+        lock = get_session_lock(session_id)
+        async with lock:
+            session = get_session(session_id)
+            conv_state = session["conversation"]
+            emotional_tracker = session["emotional_tracker"]
+            tts_controller = session["tts_controller"]
+        
+        transcript = asr_result["transcript"]
+        adaptive_state = asr_result["adaptive_state"]
+        memory_context = asr_result.get("memory_context", "")
+        llm_context = asr_result.get("llm_context", {})
+        instant_psychological_state = asr_result["fusion"]["instant_state"]
+        text_emotion = asr_result["text_emotion"]
+        audio_analysis = asr_result["audio_analysis"]
+        acoustic_features = asr_result["acoustic_features"]
+        current_turn = asr_result["turn_count"]
+        
+        # LLM response
+        llm_reply = await asyncio.to_thread(
+            psychological_llm_response, transcript, adaptive_state, llm_context, memory_context
+        )
+        llm_reply = (llm_reply or "").strip()
+        if not llm_reply or len(llm_reply) < 3:
+            llm_reply = "I'm having trouble responding right now. Could you try that again?"
+        
+        llm_reply_for_tts = _clean_markdown_for_tts(llm_reply)
+        
+        # TTS
+        tts_params = tts_controller.compute(adaptive_state)
+        tts_audio_bytes = None
+        try:
+            tts_audio_path = await asyncio.to_thread(
+                synthesize_azure_tts, llm_reply_for_tts, tts_params, "/tmp", voice_name
+            )
+            if os.path.exists(tts_audio_path) and os.path.getsize(tts_audio_path) >= 100:
+                with open(tts_audio_path, "rb") as f:
+                    tts_audio_bytes = f.read()
+                os.unlink(tts_audio_path)
+        except Exception as e:
+            logger.error(f"❌ TTS synthesis failed: {e}")
+            tts_audio_bytes = None
+        
+        # Update conversation state
+        conv_state.add_turn(transcript, llm_reply, instant_psychological_state, topic=conv_state.dialogue_state.primary_topic)
+        
+        # Memory storage
+        try:
+            previous_topic = conv_state.dialogue_state.primary_topic if current_turn > 1 else None
+            memory_decision = self.memory_orchestrator.detect_memory_worthiness(
+                user_text=transcript, system_response=llm_reply,
+                emotional_state=instant_psychological_state,
+                topic=conv_state.dialogue_state.primary_topic,
+                topic_confidence=asr_result.get("llm_context", {}).get("dialogue_state", {}).get("topic_confidence", 0),
+                previous_topic=previous_topic
+            )
+            if memory_decision.should_store:
+                self.memory_orchestrator.store_episodic_memory_with_reinforcement(
+                    user_id=session_id, session_id=session_id,
+                    user_text=transcript, system_response=llm_reply,
+                    emotional_state=instant_psychological_state,
+                    topic=conv_state.dialogue_state.primary_topic,
+                    importance_score=memory_decision.importance_score,
+                    metadata={"turn": current_turn, "mode": adaptive_state['mode']}
+                )
+            if self.memory_orchestrator.should_extract_semantic_memory(session_id, current_turn):
+                from services.llm_client import extract_semantic_facts
+                recent_turns_data = [{"user": t.user_utterance, "ai": t.system_response} for t in conv_state.recent_turns]
+                await asyncio.to_thread(self.memory_orchestrator.extract_semantic_memories, session_id, recent_turns_data, extract_semantic_facts)
+        except Exception as e:
+            logger.error(f"❌ Memory storage failed: {e}")
+        
+        # Save session
+        lock2 = get_session_lock(session_id)
+        async with lock2:
+            save_session(session_id, session)
+            await update_session_metadata(session_id, conv_state, transcript)
+        
+        # Encode audio
+        tts_audio_b64 = ""
+        if tts_audio_bytes:
+            try:
+                tts_audio_b64 = base64.b64encode(tts_audio_bytes).decode('utf-8')
+            except Exception:
+                tts_audio_b64 = ""
+        
+        return {
+            "transcript": transcript,
+            "llm_reply": llm_reply,
+            "tts_audio": tts_audio_b64,
+            "turn_count": conv_state.dialogue_state.turn_count,
+            "emotional_mode": adaptive_state['mode'],
+            "instant_state": instant_psychological_state,
+            "adaptive_state": {
+                k: v for k, v in adaptive_state.items() if k not in ['trends', 'stability']
+            },
+            "tts_params": tts_params,
+            "model_outputs": {
+                "asr": {"transcript": transcript, "latency_ms": asr_result["asr_latency_ms"]},
+                "text_emotion": {
+                    "top_emotions": dict(sorted(text_emotion.items(), key=lambda x: x[1], reverse=True)[:5]),
+                    "all_emotions": text_emotion,
+                },
+                "audio_analysis": audio_analysis,
+                "acoustic_features": acoustic_features,
+                "fusion": asr_result["fusion"],
+            },
+            "memory_view": {
+                "session_id": session_id,
+                "dialogue_state": conv_state.dialogue_state.to_dict(),
+                "recent_turns": [
+                    {
+                        "user": t.user_utterance[:50] + "..." if len(t.user_utterance) > 50 else t.user_utterance,
+                        "ai": t.system_response[:50] + "..." if len(t.system_response) > 50 else t.system_response,
+                        "topic": t.topic,
+                    }
+                    for t in conv_state.recent_turns
+                ],
+                "emotional_trends": {
+                    "mode": adaptive_state['mode'],
+                    "confidence": adaptive_state.get('confidence', 0),
+                    "valence": {"current": adaptive_state['valence'], "trend": adaptive_state.get('trends', {}).get('valence_trend', 0)},
+                    "arousal": {"current": adaptive_state['arousal'], "trend": adaptive_state.get('trends', {}).get('arousal_trend', 0)},
+                    "stress": {"current": adaptive_state['stress'], "trend": adaptive_state.get('trends', {}).get('stress_trend', 0)},
+                    "clarity": {"current": adaptive_state['clarity'], "trend": adaptive_state.get('trends', {}).get('clarity_trend', 0)},
+                },
+                "topic_info": {
+                    "current_topic": conv_state.dialogue_state.primary_topic,
+                    "confidence": conv_state.dialogue_state.topic_confidence,
+                },
+                "long_term_memory": self.memory_orchestrator.get_memory_stats(session_id),
+            },
+        }
+    
+    @modal.method()
     def test_memory_pipeline(self) -> dict:
         """
         Test function to verify memory system integration.
@@ -899,6 +1158,20 @@ class ConversationalAI:
                 html_content = f.read()
             return HTMLResponse(content=html_content)
         
+        from fastapi.responses import FileResponse
+        
+        @web_app.get("/static/{filename}")
+        async def serve_static(filename: str):
+            """Serve static frontend assets (CSS, JS)"""
+            allowed = {"styles.css", "app.js"}
+            if filename not in allowed:
+                raise HTTPException(status_code=404, detail="Not found")
+            file_path = f"/root/frontend/{filename}"
+            if not os.path.exists(file_path):
+                raise HTTPException(status_code=404, detail="Not found")
+            media_type = "text/css" if filename.endswith(".css") else "application/javascript"
+            return FileResponse(file_path, media_type=media_type)
+        
         # =====================================================
         # SESSION MANAGEMENT API ENDPOINTS
         # =====================================================
@@ -1021,11 +1294,30 @@ class ConversationalAI:
                 logger.info(f"📥 Processing - Session: {session_id}, Voice: {voice_name}, Audio: {len(audio_base64)} bytes")
                 
                 try:
-                    result = await self.process_conversation_turn.remote.aio(
-                        audio_base64,
-                        session_id,
-                        voice_name
-                    )
+                    # Step 1: ASR + emotional analysis (sends transcript early)
+                    await websocket.send_json({"status": "thinking"})
+                    asr_result = await self.process_asr_only.remote.aio(audio_base64, session_id)
+                    
+                    # Send transcript + model outputs so user sees progress
+                    await websocket.send_json({
+                        "status": "transcript",
+                        "transcript": asr_result["transcript"],
+                        "model_outputs": {
+                            "asr": {"transcript": asr_result["transcript"], "latency_ms": asr_result["asr_latency_ms"]},
+                            "text_emotion": {
+                                "top_emotions": dict(sorted(asr_result["text_emotion"].items(), key=lambda x: x[1], reverse=True)[:5]),
+                                "all_emotions": asr_result["text_emotion"],
+                            },
+                            "audio_analysis": asr_result["audio_analysis"],
+                            "acoustic_features": asr_result["acoustic_features"],
+                            "fusion": asr_result["fusion"],
+                        },
+                        "adaptive_state": asr_result["adaptive_state"],
+                        "turn_count": asr_result["turn_count"],
+                    })
+                    
+                    # Step 2: LLM + TTS (sends full response)
+                    result = await self.process_llm_and_tts.remote.aio(asr_result, session_id, voice_name)
                     
                     logger.debug(f"✅ Conversation turn completed - Turn: {result.get('turn_count', '?')}")
                     await websocket.send_json(result)
