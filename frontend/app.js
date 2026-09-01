@@ -1,5 +1,5 @@
 /* ============================================================
-   MindVoice — Application Logic
+   Application Logic
    ============================================================ */
 
 // --- State ---
@@ -196,7 +196,7 @@ function exportConversation() {
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = url;
-  a.download = `mindvoice_${new Date().toISOString().slice(0, 10)}.json`;
+  a.download = `voice_assistant_${new Date().toISOString().slice(0, 10)}.json`;
   a.click();
   URL.revokeObjectURL(url);
   showStatus('Exported!', 'success');

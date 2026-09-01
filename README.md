@@ -1,4 +1,4 @@
-# MindVoice — Psychologically Adaptive AI Voice Assistant
+# Psychologically Adaptive AI Voice Assistant
 
 A real-time conversational AI that listens to your voice, detects your emotional state across multiple modalities, and responds with psychologically adaptive language and voice — adjusting tone, pace, and style based on how your emotions are trending over the conversation.
 
@@ -21,17 +21,6 @@ A real-time conversational AI that listens to your voice, detects your emotional
 ---
 
 ## Features
-
-### Streaming Pipeline
-The conversation pipeline is split into three stages for minimum perceived latency:
-
-| Stage | What | Latency |
-|-------|------|---------|
-| 1 | ASR + emotional analysis | 1–3s |
-| 2 | LLM text generation | 2–5s |
-| 3 | TTS audio synthesis | 1–3s |
-
-Text appears on screen as soon as the LLM finishes (stage 2), while audio synthesizes in the background (stage 3). The user sees the response ~2–4 seconds sooner than a monolithic pipeline.
 
 ### Emotion-Adaptive Voice
 The TTS controller adjusts six parameters in real-time:
@@ -76,7 +65,7 @@ The WebSocket protocol sends four progressive messages per turn:
 
 ```bash
 git clone <repo-url>
-cd "MindVoice"
+cd "Emotion psychologist"
 pip install modal
 modal setup        # authenticates your Modal account
 ```
@@ -170,23 +159,6 @@ Click **Debug** in the sidebar footer to show/hide the debug panels. Click the p
 
 - **Model Outputs** — ASR transcript, text emotion scores, speech emotion, audio events, acoustic features, fusion output
 - **Memory & State** — session info, topic tracking, emotional trends with sparkline, dialogue state, long-term memory stats
-
----
-
-## Verify Deployment
-
-```bash
-# Check health
-curl https://<your-app>.modal.run/health
-# → {"status": "healthy"}
-
-# Check Qdrant connectivity
-curl https://<your-app>.modal.run/readiness
-# → {"status": "ready", "memory": "available"}
-
-# Stream live logs
-modal logs conversational-ai-realtime -f
-```
 
 ---
 
@@ -323,53 +295,6 @@ graph TB
     WS --> UI
     WS --> AUDIO
     SESSION --> WS
-```
-
-### Streaming Pipeline
-
-The WebSocket protocol sends four progressive messages per turn:
-
-```mermaid
-sequenceDiagram
-    participant U as 👤 User
-    participant F as 🖥️ Frontend
-    participant B as ☁️ Backend
-    participant L as 🤖 LLM
-    participant T as 🔊 Azure TTS
-    participant M as 🧠 Qdrant
-
-    U->>F: Click Stop (audio recorded)
-    F->>B: WebSocket: {audio, session_id, voice}
-    B-->>F: {status: "thinking"}
-
-    Note over B: Step 1: ASR + Emotion (~1-3s)
-    B->>B: Whisper → Transcript
-    B->>B: RoBERTa → Text Emotions
-    B->>B: Wav2Vec2 → Speech Emotions
-    B->>B: Librosa → Acoustic Features
-    B->>B: Fusion → Psychological State
-    B->>B: Trend Tracking
-
-    B-->>F: {status: "transcript", transcript, model_outputs}
-
-    Note over B: Step 2: LLM Text (~2-5s)
-    B->>L: Generate response
-    L-->>B: AI response text
-    B->>B: Compute TTS params
-    B->>M: Store memory (background)
-    B->>B: Save session (background)
-
-    B-->>F: {status: "response_text", llm_reply, tts_params}
-    Note over F: User sees text immediately
-    F->>F: Stream text word-by-word
-
-    Note over B: Step 3: TTS Audio (~1-3s)
-    B->>T: Synthesize audio
-    T-->>B: WAV audio
-
-    B-->>F: {status: "audio_ready", tts_audio}
-    Note over F: Audio plays concurrently
-    F->>F: Play Azure audio (or browser fallback)
 ```
 
 ### Fusion Engine
@@ -566,33 +491,6 @@ graph TB
 
 ---
 
-## Troubleshooting
-
-**Qdrant not connecting**
-Check that `QDRANT_URL` is the full HTTPS URL and `QDRANT_API_KEY` is correct. For cloud URLs, do not set `QDRANT_PORT`. The system degrades gracefully — conversations still work without long-term memory.
-
-**WebSocket closes immediately**
-Check browser console for the close code: `1008` = client-side issue (bad JSON, rate limit), `1011` = server-side issue (see Modal logs).
-
-**Cold start takes a long time**
-Only the first deploy or a dependency change triggers a full rebuild. Models are pre-downloaded during image build. Code-only changes redeploy in ~10 seconds.
-
-**AI response is cut off**
-The LLM max_tokens is set to 500. If responses are still truncated, check the Nebius/OpenAI API quota.
-
-**Audio doesn't play**
-If Azure TTS fails, the system falls back to browser SpeechSynthesis. Check `AZURE_TTS_KEY` and `AZURE_TTS_REGION` in your Modal secrets.
-
-**Voice sounds robotic / no style adaptation**
-Ensure the selected voice supports the styles being used. The system validates styles per-voice and falls back to "assistant" for unsupported styles.
-
-For all other issues, see the [Troubleshooting section in documentation.md](documentation.md#14-troubleshooting) or check logs:
-```bash
-modal logs conversational-ai-realtime -f
-```
-
----
-
 ## Tech Stack
 
 | Layer | Technology |
@@ -613,4 +511,4 @@ modal logs conversational-ai-realtime -f
 
 ## License
 
-Research and educational use.
+Licensed under the Apache License, Version 2.0. See [LICENSE](LICENSE) for the full license text.

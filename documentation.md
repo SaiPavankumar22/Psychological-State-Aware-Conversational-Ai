@@ -1048,7 +1048,7 @@ CSS and JS are embedded inline in the HTML response at startup for reliability.
 ```
 ┌───────────────────────────────────────────────────────────────┐
 │  Sidebar (260px)            │  Main Content (flex: 1)         │
-│  • Brand: MindVoice         │  • Title: MindVoice (gradient)  │
+│  • Brand: Voice Assistant   │  • Title: Voice Assistant (gradient)  │
 │  • New Chat button          │  • Voice selector (pill)        │
 │  • Search bar               │  • Turn counter + mode badge    │
 │  • Session list             │  • Mic ring (animated states)   │
